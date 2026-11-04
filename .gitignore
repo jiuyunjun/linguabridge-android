@@ -1,0 +1,23 @@
+.gradle/
+**/build/
+local.properties
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.pem
+*.key
+*.db
+*.db-*
+*.sqlite*
+captures/
+raw-exports/
+*.apk
+*.aab
+__pycache__/
+*.pyc
+# Debug-only signing key (public password), committed so debug signatures stay fixed.
+!android/keystore/debug.keystore
