@@ -16,6 +16,8 @@ import dev.linguabridge.data.FixtureExporter
 import dev.linguabridge.data.ProxySettingsStore
 import dev.linguabridge.data.api.AssistOutcome
 import dev.linguabridge.data.api.AssistanceRepository
+import dev.linguabridge.data.api.OpenAIDirectClient
+import dev.linguabridge.data.api.PartialResult
 import dev.linguabridge.domain.*
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.*
@@ -33,13 +35,18 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     private val queue = Mutex()
     private val gate = InspectionGate()
     private val repository = AssistanceRepository(allowDebugLoopback = true)
+    /** Debug direct mode: set when android/openai.properties had a key at build time. */
+    private val direct = OpenAIDirectClient.fromBuildConfig()
     private lateinit var prefs: AssistantPrefs
     private lateinit var assistant: FloatingAssistant
     private var inputMethods: Set<String> = emptySet()
     private var launchers: Set<String> = emptySet()
     private var foreground: String? = null
     private var hiddenUntilSwitch: String? = null
-    private var work: Job? = null
+    private var captureJob: Job? = null
+    private var translateJob: Job? = null
+    private var replyJob: Job? = null
+    private fun cancelWork() { captureJob?.cancel(); translateJob?.cancel(); replyJob?.cancel() }
     private var expiry: Job? = null
     /** Screen text of the open panel only. Cleared when the panel closes or the app changes. */
     private var page: ReviewedPage? = null
@@ -84,7 +91,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
             foreground = pkg
             hiddenUntilSwitch = null
             gate.invalidate()
-            work?.cancel()
+            cancelWork()
             page = null
             if (::assistant.isInitialized && assistant.panelOpen) assistant.closePanel()
         }
@@ -97,40 +104,47 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
 
     override fun onBubbleTap() {
         val pkg = foreground ?: return
-        if (work?.isActive == true || !eligible(pkg) || locked()) return
+        if (captureJob?.isActive == true || !eligible(pkg) || locked()) return
         assistant.setBubbleBusy(true)
-        work = scope.launch {
+        // Reading the screen is local; nothing is uploaded until a tab needs it
+        // (translate tab -> page translation, reply tab -> only when "生成回复" is tapped).
+        captureJob = scope.launch {
             val result = captureScreen(CaptureTarget(pkg))
             assistant.setBubbleBusy(false)
             if (foreground != pkg) return@launch
+            val screen = (result as? CaptureResult.Success)?.let { PageContext.screen(it.snapshot) }
+            page = screen?.takeIf { it.blocks.isNotEmpty() }
             assistant.hideBubble()
-            assistant.openPanel()
-            when (result) {
-                is CaptureResult.Failure -> assistant.showError(captureMessage(result.reason), retry = false)
-                is CaptureResult.Success -> {
-                    val screen = PageContext.screen(result.snapshot)
-                    if (screen.blocks.isEmpty()) {
-                        assistant.showError("这个页面没有读到可翻译的文字（可能是图片或 App 不开放无障碍内容）", retry = false)
-                    } else {
-                        page = screen
-                        translate(screen)
-                    }
-                }
+            val failed = page == null
+            assistant.openPanel(if (failed || prefs.initialTab == "translate") FloatingAssistant.Tab.TRANSLATE else FloatingAssistant.Tab.REPLY,
+                page?.blocks?.size ?: 0)
+            when {
+                result is CaptureResult.Failure -> assistant.showError(captureMessage(result.reason), retry = false)
+                failed -> assistant.showError("这个页面没有读到文字（可能是图片或 App 不开放无障碍内容）", retry = false)
             }
         }
+    }
+
+    override fun onTranslateNeeded() {
+        val screen = page ?: return
+        if (translateJob?.isActive != true) translate(screen)
     }
 
     override fun onRetry() { page?.let { translate(it) } }
 
     private fun translate(screen: ReviewedPage) {
         assistant.showWorking("正在翻译当前屏幕…")
-        work = scope.launch {
+        translateJob = scope.launch {
             val request = AssistRequest(operation = AssistOperation.TRANSLATE_PAGE, targetLanguage = prefs.translateLanguage,
                 pageType = "auto", sourcePackage = screen.sourcePackage, targetBlockId = "", userIntent = "", blocks = screen.blocks)
-            when (val outcome = call(request)) {
+            val byId = screen.blocks.associateBy { it.id }
+            val outcome = call(request) { partial ->
+                val lines = partial.translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
+                if (lines.isNotEmpty()) onMain { if (translateJob?.isActive == true) assistant.showTranslationProgress(lines) }
+            }
+            when (outcome) {
                 is AssistOutcome.Error -> assistant.showError(outcome.message, retry = true)
                 is AssistOutcome.Success -> {
-                    val byId = screen.blocks.associateBy { it.id }
                     val lines = outcome.result.translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
                     if (lines.isEmpty()) assistant.showError("这一屏没有需要翻译的文字", retry = false)
                     else assistant.showTranslations(lines, outcome.result.demo)
@@ -141,9 +155,9 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
 
     override fun onGenerateReply(intent: String, tone: String) {
         val screen = page ?: return assistant.showError("页面内容已失效，请关闭后重新点悬浮球", retry = false)
-        if (work?.isActive == true) return
+        if (replyJob?.isActive == true) return
         assistant.showReplyWorking()
-        work = scope.launch {
+        replyJob = scope.launch {
             val budget = PageContext.MAX_BYTES - intent.toByteArray(Charsets.UTF_8).size
             // Keep the most recent (bottom) blocks that fit next to the user's intent.
             val blocks = screen.blocks.reversed().runningFold(0 to listOf<ContextBlock>()) { (used, acc), block ->
@@ -152,21 +166,30 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
             if (blocks.isEmpty()) { assistant.showError("回复要求太长，请缩短后重试", retry = false); return@launch }
             val request = AssistRequest(operation = AssistOperation.REPLY, targetLanguage = prefs.replyLanguage, pageType = "auto",
                 sourcePackage = screen.sourcePackage, targetBlockId = "", userIntent = intent, blocks = blocks, tone = tone)
-            when (val outcome = call(request)) {
+            val outcome = call(request) { partial ->
+                if (partial.text.isNotBlank()) onMain { if (replyJob?.isActive == true) assistant.showReplyProgress(partial.text) }
+            }
+            when (outcome) {
                 is AssistOutcome.Error -> assistant.showError(outcome.message, retry = false)
                 is AssistOutcome.Success -> with(outcome.result) { assistant.showReply(text, notes, questions, demo) }
             }
         }
     }
 
-    private suspend fun call(request: AssistRequest): AssistOutcome {
+    /** Posts streaming progress (delivered on a network thread) to the main thread, in order. */
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private fun onMain(block: () -> Unit) { mainHandler.post(block) }
+
+    /** Direct mode streams progress to [onPartial]; the proxy returns the whole result at once. */
+    private suspend fun call(request: AssistRequest, onPartial: ((PartialResult) -> Unit)? = null): AssistOutcome {
+        direct?.let { return it.generate(request, prefs.openAiModel.ifBlank { it.defaultModel }, onPartial) }
         val settings = withContext(Dispatchers.IO) { runCatching { ProxySettingsStore(this@InspectorService).load() }.getOrNull() }
-            ?: return AssistOutcome.Error("还没配置翻译代理：打开“上下文助手”App 设置")
+            ?: return AssistOutcome.Error("还没配置翻译代理：打开 LinguaBridge 设置")
         return repository.generate(settings, request)
     }
 
     override fun onCopy(text: String) {
-        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("上下文助手", text))
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("LinguaBridge", text))
         Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show()
     }
 
@@ -179,7 +202,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
                 rootInActiveWindow?.let { root -> InputFiller.fill(root, pkg, text) } ?: false
             }.getOrDefault(false)
             if (!filled) {
-                getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("上下文助手", text))
+                getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("LinguaBridge", text))
                 Toast.makeText(this@InspectorService, "没找到可填入的输入框，已复制，请手动粘贴", Toast.LENGTH_LONG).show()
             }
         }
@@ -192,7 +215,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     }
 
     override fun onPanelClosed() {
-        work?.cancel()
+        translateJob?.cancel(); replyJob?.cancel()
         gate.invalidate()
         page = null
         refreshBubble()
@@ -257,12 +280,12 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     }
 
     private fun shutdown(message: String) {
-        work?.cancel(); expiry?.cancel(); gate.stop(); page = null
+        cancelWork(); expiry?.cancel(); gate.stop(); page = null
         if (::assistant.isInitialized) assistant.destroy()
         InspectorState.update { it.copy(connected = false, message = message) }
     }
 
-    override fun onInterrupt() { work?.cancel(); gate.invalidate() }
+    override fun onInterrupt() { cancelWork(); gate.invalidate() }
     override fun onUnbind(intent: Intent?): Boolean {
         if (::prefs.isInitialized) prefs.preferences.unregisterOnSharedPreferenceChangeListener(prefListener)
         shutdown("服务未连接")

@@ -494,3 +494,14 @@ Go 使用标准库，认证常量时间比较，48KiB 请求体、字段/计数/
 - 整屏会混入标题、按钮等非正文文字；只做了纯数字/时间过滤，效果需真机评估。
 - ACTION_SET_TEXT 会覆盖输入框已有内容，部分 App（自定义输入控件）可能拒绝写入。
 - 无障碍浮层上的输入法行为因 ROM 而异，HyperOS 上需实测。
+
+### 15.5 调试直连 OpenAI（用户决定）
+
+用户要求先“用 API Key 裸连”。实现为 Debug 专用：`android/openai.properties`（git 忽略）在编译时写入 debug BuildConfig；有 Key 时服务改用 `OpenAIDirectClient` 直接调用 Responses API（与 Go 代理相同的可信规则 / 不可信页面分离、严格 JSON Schema、store=false、输出遍历与结果校验），否则仍走认证代理。这违反了“密钥不进 APK”的原则：任何拿到该 Debug APK 的人都能提取 Key，因此仅限本人手机侧载，不得分发；Release 构建不含该字段与客户端，打包脚本检查。部署或分享前应回到代理模式。
+
+### 15.6 只回复、模型切换与流式输出（2026-11-04）
+
+- 产品名统一为 LinguaBridge（与 translator-ext 一致）。
+- 点悬浮球只在本地读取屏幕并打开面板；翻译改为懒加载，只有翻译标签可见时才请求 `translate_page`。面板默认打开上次使用的标签，可在设置固定为翻译或回复；回复标签自动聚焦输入框并弹出键盘，显示已读取的上下文段数。翻译与回复使用独立任务，互不阻塞。
+- 调试直连模式下可从 `/v1/models` 拉取模型列表（名称规则过滤出聊天模型），在设置中切换，选择保存在本机并覆盖 `openai.properties` 的默认值。
+- 直连模式使用 Responses 流式输出（SSE）：从 `response.output_text.delta` 累积的不完整 JSON 中只提取展示用进度（回复草稿文字、已完整的翻译条目），最终仍以 `response.completed` 的完整对象经 `parseAssistResult` 校验；拒绝、失败、截断、中断均为可恢复错误。代理模式仍一次性返回。

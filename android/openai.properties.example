@@ -1,0 +1,6 @@
+# Copy to android/openai.properties (git-ignored) and fill in. DEBUG builds only.
+# The key is compiled into the debug APK: install it on your own phone only, never share the APK.
+# Leave OPENAI_API_KEY empty to go back to the authenticated proxy.
+OPENAI_API_KEY=
+# Required with a key: a Responses-API model that supports Structured Outputs.
+OPENAI_MODEL=

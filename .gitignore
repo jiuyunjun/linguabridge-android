@@ -21,3 +21,7 @@ __pycache__/
 *.pyc
 # Debug-only signing key (public password), committed so debug signatures stay fixed.
 !android/keystore/debug.keystore
+# Local OpenAI key for debug direct mode. Never commit.
+android/openai.properties
+# Editor local history (may contain secrets)
+.history/

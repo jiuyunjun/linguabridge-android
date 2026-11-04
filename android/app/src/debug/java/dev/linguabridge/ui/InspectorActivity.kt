@@ -30,6 +30,7 @@ import dev.linguabridge.accessibility.InspectorState
 import dev.linguabridge.data.AssistantPrefs
 import dev.linguabridge.data.FixtureExporter
 import dev.linguabridge.data.ProxySettingsStore
+import dev.linguabridge.data.api.OpenAIDirectClient
 import dev.linguabridge.data.api.ProxySettings
 import dev.linguabridge.domain.CaptureTarget
 import kotlinx.coroutines.Dispatchers
@@ -74,6 +75,7 @@ class InspectorActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         val store = remember { ProxySettingsStore(this) }
         val prefs = remember { AssistantPrefs(this) }
+        val direct = remember { OpenAIDirectClient.fromBuildConfig() }
         var enabled by remember { mutableStateOf(false) }
         var settings by remember { mutableStateOf<ProxySettings?>(null) }
         var baseUrl by remember { mutableStateOf("") }
@@ -86,6 +88,9 @@ class InspectorActivity : ComponentActivity() {
         var apps by remember { mutableStateOf<List<CaptureTarget>>(emptyList()) }
         var chooseApp by remember { mutableStateOf(false) }
         var notice by remember { mutableStateOf("") }
+        var model by remember { mutableStateOf(prefs.openAiModel.ifBlank { direct?.defaultModel.orEmpty() }) }
+        var chooseModel by remember { mutableStateOf(false) }
+        var openWith by remember { mutableStateOf(prefs.openWith) }
 
         LaunchedEffect(resumeEpoch) {
             enabled = serviceEnabled()
@@ -106,21 +111,25 @@ class InspectorActivity : ComponentActivity() {
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp).testTag("settings"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Column(Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
-                Text("LINGUABRIDGE", color = Muted, fontSize = 12.sp, letterSpacing = 2.sp)
-                Text("上下文助手", fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                Text("上下文翻译 · 回复", color = Muted, fontSize = 12.sp, letterSpacing = 2.sp)
+                Text("LinguaBridge", fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Text("配置一次后，在任意 App 里点悬浮球即可翻译整屏，或写一句话生成回复。", color = Muted, fontSize = 14.sp)
             }
 
             Section {
                 StatusRow(if (enabled && status.connected) Ok else Warn, "无障碍服务",
-                    if (enabled && status.connected) "悬浮球已就绪" else "未开启：在系统设置里打开“上下文助手”") {
+                    if (enabled && status.connected) "悬浮球已就绪" else "未开启：在系统设置里打开“LinguaBridge”") {
                     SmallButton("系统设置") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 }
                 HorizontalDivider(color = Line)
-                StatusRow(if (settings != null) Ok else Warn, "翻译代理", settings?.baseUrl ?: "未配置") {
+                if (direct != null) StatusRow(if (model.isNotBlank()) Ok else Warn, "OpenAI 直连（调试）",
+                    (if (model.isBlank()) "未选择模型" else "模型 $model") + " · Key 在本 APK 内，勿外传") {
+                    SmallButton("更换模型", Modifier.testTag("choose-model")) { chooseModel = true }
+                }
+                else StatusRow(if (settings != null) Ok else Warn, "翻译代理", settings?.baseUrl ?: "未配置") {
                     SmallButton(if (editingProxy) "收起" else "修改", Modifier.testTag("edit-proxy")) { editingProxy = !editingProxy }
                 }
-                if (editingProxy || settings == null) {
+                if (direct == null && (editingProxy || settings == null)) {
                     OutlinedTextField(baseUrl, { baseUrl = it }, Modifier.fillMaxWidth().testTag("proxy-url"),
                         label = { Text("代理根地址（HTTPS）") }, singleLine = true)
                     OutlinedTextField(tokenInput, { tokenInput = it }, Modifier.fillMaxWidth().testTag("proxy-token"),
@@ -144,6 +153,15 @@ class InspectorActivity : ComponentActivity() {
             Section {
                 Text("翻译成", fontWeight = FontWeight.Medium)
                 ChipRow(AssistantPrefs.TRANSLATE_LANGUAGES, translateLanguage, "translate") { translateLanguage = it; prefs.translateLanguage = it }
+                Text("点悬浮球后打开", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AssistantPrefs.OPEN_WITH.forEach { (id, name) ->
+                        FilterChip(id == openWith, { openWith = id; prefs.openWith = id }, label = { Text(name) },
+                            modifier = Modifier.testTag("open-$id"), shape = RoundedCornerShape(20.dp),
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentDim, selectedLabelColor = Accent, labelColor = TextMain))
+                    }
+                }
+                Text("只回复时不会请求翻译；切到“翻译”标签才翻译。", color = Muted, fontSize = 12.sp)
                 Text("回复用", fontWeight = FontWeight.Medium)
                 ChipRow(AssistantPrefs.REPLY_LANGUAGES, replyLanguage, "reply") { replyLanguage = it; prefs.replyLanguage = it }
             }
@@ -172,7 +190,7 @@ class InspectorActivity : ComponentActivity() {
                 }
             }
 
-            Text("点悬浮球时读取当前屏幕可见文字，发到你的代理（再到 OpenAI）。密码框、输入框里的文字不读；原文不保存。回复只在你点“填入”时写进输入框，不会自动发送。",
+            Text((if (direct != null) "点悬浮球时读取当前屏幕可见文字，直接发到 OpenAI。" else "点悬浮球时读取当前屏幕可见文字，发到你的代理（再到 OpenAI）。") + "密码框、输入框里的文字不读；原文不保存。回复只在你点“填入”时写进输入框，不会自动发送。",
                 color = Muted, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(horizontal = 4.dp))
             if (notice.isNotEmpty()) Text(notice, color = Accent, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp).testTag("notice"))
             TextButton({
@@ -181,10 +199,55 @@ class InspectorActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) { store.clear(); prefs.clear(); FixtureExporter.clear(this@InspectorActivity) }
                         settings = null; baseUrl = ""; translateLanguage = prefs.translateLanguage; replyLanguage = prefs.replyLanguage
                         bubbleEnabled = prefs.bubbleEnabled; hidden = prefs.hiddenPackages
+                        model = direct?.defaultModel.orEmpty(); openWith = prefs.openWith
                         "本机配置和导出已清空"
                     } catch (_: Exception) { "部分数据清理失败，可在系统中清除应用数据" }
                 }
             }, Modifier.testTag("clear-all")) { Text("清空本机配置", color = Danger) }
+        }
+
+        if (chooseModel && direct != null) {
+            var loading by remember { mutableStateOf(true) }
+            var ids by remember { mutableStateOf<List<String>>(emptyList()) }
+            var error by remember { mutableStateOf("") }
+            var search by remember { mutableStateOf("") }
+            var reload by remember { mutableIntStateOf(0) }
+            LaunchedEffect(reload) {
+                loading = true; error = ""
+                when (val result = direct.listChatModels()) {
+                    is OpenAIDirectClient.ModelList.Success -> ids = result.ids
+                    is OpenAIDirectClient.ModelList.Error -> error = result.message
+                }
+                loading = false
+            }
+            AlertDialog(onDismissRequest = { chooseModel = false }, title = { Text("选择模型") }, text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("来自你的 API Key 可用的 /v1/models，只列出聊天类模型（按名称规则过滤）。", color = Muted, fontSize = 12.sp)
+                    OutlinedTextField(search, { search = it }, label = { Text("搜索") }, singleLine = true)
+                    when {
+                        loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Text("  正在获取…", color = Muted)
+                        }
+                        error.isNotEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(error, color = Danger, modifier = Modifier.weight(1f)); TextButton({ reload++ }) { Text("重试") }
+                        }
+                        ids.isEmpty() -> Text("没有找到聊天模型", color = Muted)
+                    }
+                    LazyColumn(Modifier.heightIn(max = 380.dp).testTag("model-list")) {
+                        items(ids.filter { search.isBlank() || it.contains(search.trim(), true) }, key = { it }) { id ->
+                            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                                RadioButton(id == model, { model = id; prefs.openAiModel = id; chooseModel = false; notice = "已切换到 $id" })
+                                Text(id, Modifier.weight(1f), fontSize = 14.sp)
+                                if (id == direct.defaultModel) Text("默认", color = Muted, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }, confirmButton = { TextButton({ chooseModel = false }) { Text("关闭") } }, dismissButton = {
+                if (direct.defaultModel.isNotBlank() && model != direct.defaultModel) TextButton({
+                    prefs.openAiModel = ""; model = direct.defaultModel; chooseModel = false; notice = "已恢复默认模型 ${direct.defaultModel}"
+                }) { Text("恢复默认") }
+            })
         }
 
         if (chooseApp) {

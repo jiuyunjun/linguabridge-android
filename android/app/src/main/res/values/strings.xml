@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">上下文助手</string>
-    <string name="release_placeholder">页面上下文助手目前仅提供 Debug APK。请使用 Debug 构建。</string>
+    <string name="app_name">LinguaBridge</string>
+    <string name="release_placeholder">LinguaBridge 目前仅提供 Debug APK。请使用 Debug 构建。</string>
 </resources>

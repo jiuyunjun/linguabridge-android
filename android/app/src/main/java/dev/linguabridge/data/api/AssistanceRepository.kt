@@ -74,31 +74,10 @@ class AssistanceRepository(
                             val bytes = source.readByteArray()
                             val json = JSONObject(String(bytes, Charsets.UTF_8))
                             require(json.get("requestId") is String && json.getString("requestId") == input.requestId)
-                            require(json.get("text") is String && json.get("notes") is String && json.get("needsClarification") is Boolean && json.get("demo") is Boolean)
-                            val text = json.getString("text"); val notes = json.getString("notes")
-                            val needs = json.getBoolean("needsClarification")
-                            val questions = json.getJSONArray("questions").let { array ->
-                                require(array.length() <= 3)
-                                List(array.length()) { index -> require(array.get(index) is String); array.getString(index).also { q -> require(q.isNotBlank() && q.codePointCount(0, q.length) <= 300) } }
-                            }
-                            require(text.codePointCount(0, text.length) <= 8000 && notes.codePointCount(0, notes.length) <= 1000)
-                            require(!needs || questions.isNotEmpty())
-                            val translations = json.getJSONArray("translations").let { array ->
-                                require(array.length() <= input.blocks.size)
-                                val known = input.blocks.map { b -> b.id }.toSet()
-                                List(array.length()) { index ->
-                                    val item = array.getJSONObject(index)
-                                    require(item.length() == 2 && item.get("id") is String && item.get("text") is String)
-                                    BlockTranslation(item.getString("id"), item.getString("text")).also { t ->
-                                        require(t.id in known && t.text.isNotBlank() && t.text.codePointCount(0, t.text.length) <= 8000)
-                                    }
-                                }.also { list -> require(list.map { t -> t.id }.distinct().size == list.size) }
-                            }
-                            if (input.operation == AssistOperation.TRANSLATE_PAGE) require(!needs && translations.isNotEmpty())
-                            else require(translations.isEmpty() && (needs || (text.isNotBlank() && questions.isEmpty())))
+                            require(json.get("demo") is Boolean)
                             require(json.get("model") is String)
                             val model = json.getString("model"); require(model.isNotBlank() && model.length <= 200)
-                            AssistOutcome.Success(AssistResult(text, notes, needs, questions, model, json.getBoolean("demo"), translations))
+                            AssistOutcome.Success(parseAssistResult(json, input, model, json.getBoolean("demo")))
                         } catch (_: java.io.InterruptedIOException) { AssistOutcome.Error("读取结果超时；上下文仍保留，可手动重试")
                         } catch (_: Exception) { AssistOutcome.Error("代理返回格式错误；上下文仍保留，可手动重试") }
                     }
@@ -107,4 +86,34 @@ class AssistanceRepository(
             })
         }
     }
+}
+
+/**
+ * Validates the model's JSON object (shared by the proxy client and the debug direct client).
+ * Extra keys such as requestId/model/demo are allowed here; the caller checks those.
+ */
+internal fun parseAssistResult(json: JSONObject, input: AssistRequest, model: String, demo: Boolean): AssistResult {
+    require(json.get("text") is String && json.get("notes") is String && json.get("needsClarification") is Boolean)
+    val text = json.getString("text"); val notes = json.getString("notes")
+    val needs = json.getBoolean("needsClarification")
+    val questions = json.getJSONArray("questions").let { array ->
+        require(array.length() <= 3)
+        List(array.length()) { index -> require(array.get(index) is String); array.getString(index).also { q -> require(q.isNotBlank() && q.codePointCount(0, q.length) <= 300) } }
+    }
+    require(text.codePointCount(0, text.length) <= 8000 && notes.codePointCount(0, notes.length) <= 1000)
+    require(!needs || questions.isNotEmpty())
+    val translations = json.getJSONArray("translations").let { array ->
+        require(array.length() <= input.blocks.size)
+        val known = input.blocks.map { b -> b.id }.toSet()
+        List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            require(item.length() == 2 && item.get("id") is String && item.get("text") is String)
+            BlockTranslation(item.getString("id"), item.getString("text")).also { t ->
+                require(t.id in known && t.text.isNotBlank() && t.text.codePointCount(0, t.text.length) <= 8000)
+            }
+        }.also { list -> require(list.map { t -> t.id }.distinct().size == list.size) }
+    }
+    if (input.operation == AssistOperation.TRANSLATE_PAGE) require(!needs && translations.isNotEmpty())
+    else require(translations.isEmpty() && (needs || (text.isNotBlank() && questions.isEmpty())))
+    return AssistResult(text, notes, needs, questions, model, demo, translations)
 }

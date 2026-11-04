@@ -41,9 +41,11 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
         fun onFill(text: String)
         fun onRetry()
         fun onPanelClosed()
+        /** The translate tab became visible and has nothing yet: translation is requested lazily. */
+        fun onTranslateNeeded()
     }
 
-    private enum class Tab { TRANSLATE, REPLY }
+    enum class Tab { TRANSLATE, REPLY }
 
     private val windows = context.getSystemService(WindowManager::class.java)
     private var bubble: TextView? = null
@@ -74,7 +76,7 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f); typeface = Typeface.DEFAULT_BOLD
             background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(BG); setStroke(dp(2), TEXT) }
             elevation = dp(6).toFloat()
-            contentDescription = "上下文助手：翻译或回复"
+            contentDescription = "LinguaBridge：翻译或回复"
         }
         val metrics = context.resources.displayMetrics
         val params = overlayParams(size, size, focusable = false).apply {
@@ -117,9 +119,13 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
 
     // ---------- panel ----------
 
-    fun openPanel() {
+    private var contextBlocks = 0
+
+    /** Opens on [initial]; nothing is uploaded until a tab asks for it. */
+    fun openPanel(initial: Tab, blocks: Int) {
         if (panel != null) return
-        tab = Tab.TRANSLATE
+        tab = initial
+        contextBlocks = blocks
         translatedText = ""; replyText = ""
         val scrim = object : FrameLayout(context) {
             override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -190,38 +196,78 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
         listener.onPanelClosed()
     }
 
-    private fun selectTab(selected: Tab) { tab = selected; renderTabs() }
+    private fun selectTab(selected: Tab) {
+        tab = selected
+        prefs.lastTab = if (selected == Tab.REPLY) "reply" else "translate"
+        renderTabs()
+    }
 
     private fun renderTabs() {
         styleTab(translateTab, tab == Tab.TRANSLATE)
         styleTab(replyTab, tab == Tab.REPLY)
-        if (tab == Tab.TRANSLATE) (translateView ?: { showStatus("正在读取当前屏幕…"); clear() })() else (replyView ?: ::renderReplyForm)()
+        if (tab == Tab.TRANSLATE) {
+            val view = translateView
+            if (view != null) view() else { showStatus("正在翻译当前屏幕…"); clear(); listener.onTranslateNeeded() }
+        } else {
+            (replyView ?: ::renderReplyForm)()
+            if (replyText.isEmpty()) focusIntent()
+        }
+    }
+
+    private fun focusIntent() {
+        val input = intentInput ?: return
+        input.post {
+            input.requestFocus()
+            context.getSystemService(InputMethodManager::class.java).showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     // ---------- translate tab ----------
 
+    /** Line cards currently shown by a streaming translation render; -1 when not streaming. */
+    private var streamedLines = -1
+
     fun showWorking(message: String) {
+        streamedLines = -1
         translateView = { showStatus(message); clear() }
         if (tab == Tab.TRANSLATE) translateView!!()
     }
 
+    private fun addLineCard(line: TranslatedLine) {
+        content?.addView(card().apply {
+            addView(label(line.original, 13f, MUTED))
+            addView(label(line.translation, 15f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) })
+        }, cardParams())
+    }
+
+    /** Streaming: completed translations so far. Appends only new cards while the tab is visible. */
+    fun showTranslationProgress(lines: List<TranslatedLine>) {
+        val status = "翻译中… 已完成 ${lines.size} 段"
+        translateView = {
+            showStatus(status); clear(); lines.forEach(::addLineCard)
+            footerButtons(secondary("关闭") { closePanel() })
+            streamedLines = lines.size
+        }
+        if (tab != Tab.TRANSLATE) { streamedLines = -1; return }
+        if (streamedLines in 0..lines.size) {
+            lines.drop(streamedLines).forEach(::addLineCard); streamedLines = lines.size; showStatus(status)
+        } else translateView!!()
+    }
+
     fun showTranslations(lines: List<TranslatedLine>, demo: Boolean) {
+        streamedLines = -1
         translatedText = lines.joinToString("\n") { it.translation }
         translateView = {
             showStatus(if (demo) "固定模拟结果 · 未调用 OpenAI" else "已翻译当前屏幕 · ${lines.size} 段", if (demo) WARN else OK)
             clear()
-            lines.forEach { line ->
-                content?.addView(card().apply {
-                    addView(label(line.original, 13f, MUTED))
-                    addView(label(line.translation, 15f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) })
-                }, cardParams())
-            }
+            lines.forEach(::addLineCard)
             footerButtons(secondary("复制译文") { listener.onCopy(translatedText) }, primary("回复对方") { selectTab(Tab.REPLY) })
         }
         if (tab == Tab.TRANSLATE) translateView!!()
     }
 
     fun showError(message: String, retry: Boolean) {
+        streamedLines = -1
         val view = {
             showStatus(message, ERROR); clear()
             if (retry) footerButtons(secondary("关闭") { closePanel() }, primary("重试") { listener.onRetry() })
@@ -233,8 +279,9 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     // ---------- reply tab ----------
 
     private fun renderReplyForm() {
+        streamTextView = null
         val language = AssistantPrefs.LANGUAGE_LABELS[prefs.replyLanguage]
-        showStatus("写下你想说的话（中文就行），会结合屏幕上的对话生成 · → $language")
+        showStatus("已读取屏幕 $contextBlocks 段作为上下文 · 写下你想说的（中文就行）→ $language")
         clear()
         val input = (intentInput ?: EditText(context).apply {
             hint = "例如：可以，资料收到后我会先看一遍"
@@ -270,8 +317,25 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     }
 
     fun showReplyWorking() {
+        replyText = ""; replyNotes = ""
         replyView = { renderReplyForm(); showStatus("正在生成回复…") }
         if (tab == Tab.REPLY) replyView!!()
+    }
+
+    private var streamTextView: TextView? = null
+
+    /** Streaming: the draft so far. Updates the draft text in place to avoid re-creating the input box. */
+    fun showReplyProgress(text: String) {
+        replyView = {
+            renderReplyForm(); showStatus("生成中…")
+            content?.addView(card(ACCENT_DIM).apply {
+                addView(label("回复草稿", 12f, ACCENT_SOFT))
+                addView(label(text, 16f, TEXT).apply { setPadding(0, dp(6), 0, 0) }.also { streamTextView = it })
+            }, cardParams())
+        }
+        if (tab != Tab.REPLY) return
+        val view = streamTextView
+        if (view != null && view.isAttachedToWindow) view.text = text else replyView!!()
     }
 
     fun showReply(text: String, notes: String, questions: List<String>, demo: Boolean) {

@@ -39,7 +39,7 @@ foreach ($taskVariant in @('debug', 'release')) {
                 try {
                     $taskStream.CopyTo($taskBuffer)
                     $taskDex = [System.Text.Encoding]::UTF8.GetString($taskBuffer.ToArray())
-                    if ($taskDex -match 'InspectorService|InspectorActivity|FixtureExporter|DebugInspectReceiver') {
+                    if ($taskDex -match 'InspectorService|InspectorActivity|FixtureExporter|DebugInspectReceiver|OpenAIDirectClient|OPENAI_API_KEY') {
                         throw 'Release DEX contains debug code'
                     }
                 } finally { $taskStream.Dispose(); $taskBuffer.Dispose() }

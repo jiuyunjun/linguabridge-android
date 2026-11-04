@@ -1,8 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+// DEBUG-only direct OpenAI access. android/openai.properties is git-ignored.
+val openAi = Properties().apply {
+    rootProject.file("openai.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+}
+fun quotedConfig(value: String?): String =
+    "\"" + value.orEmpty().trim().replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "dev.linguabridge"
     compileSdk = 35
@@ -25,12 +34,18 @@ android {
             keyPassword = "android"
         }
     }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildTypes { debug { applicationIdSuffix = ".debug" } }
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            buildConfigField("String", "OPENAI_API_KEY", quotedConfig(openAi.getProperty("OPENAI_API_KEY")))
+            buildConfigField("String", "OPENAI_MODEL", quotedConfig(openAi.getProperty("OPENAI_MODEL")))
+        }
+    }
 }
 kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 dependencies {
