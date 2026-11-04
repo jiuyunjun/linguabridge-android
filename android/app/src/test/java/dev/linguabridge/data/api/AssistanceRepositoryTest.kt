@@ -15,7 +15,7 @@ class AssistanceRepositoryTest {
         operation = operation, targetLanguage = "ja", pageType = "email", sourcePackage = "mail.synthetic",
         targetBlockId = if (operation == AssistOperation.TRANSLATE_PAGE) "" else "b1",
         userIntent = if (operation == AssistOperation.REPLY) "Politely decline" else "",
-        tone = if (operation == AssistOperation.REPLY) "polite" else "",
+        tone = if (operation == AssistOperation.REPLY) "formal" else "",
         blocks = listOf(ContextBlock("b1", "0/1", NodeBounds(0, 0, 50, 50), "Synthetic mail")))
     private val valid = """{"requestId":"test-request","text":"翻訳","notes":"","needsClarification":false,"questions":[],"translations":[],"model":"fake-model","demo":false}"""
     private val validPage = """{"requestId":"test-request","text":"","notes":"","needsClarification":false,"questions":[],"translations":[{"id":"b1","text":"合成邮件"}],"model":"fake-model","demo":false}"""
@@ -42,7 +42,7 @@ class AssistanceRepositoryTest {
                 val json = org.json.JSONObject(sent.body.readUtf8())
                 assertEquals(operation.name.lowercase(), json.getString("operation"))
                 assertFalse(json.has("apiKey"))
-                assertEquals(operation == AssistOperation.REPLY, json.optString("tone") == "polite")
+                assertEquals(operation == AssistOperation.REPLY, json.optString("tone") == "formal")
                 if (operation == AssistOperation.TRANSLATE_PAGE)
                     assertEquals("合成邮件", (result as AssistOutcome.Success).result.translations.single().text)
             }

@@ -7,7 +7,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Bitmap
 import android.os.Build
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
@@ -21,6 +23,7 @@ import dev.linguabridge.data.api.PartialResult
 import dev.linguabridge.domain.*
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.*
+import kotlin.coroutines.resume
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -119,8 +122,10 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
             assistant.openPanel(if (failed || prefs.initialTab == "translate") FloatingAssistant.Tab.TRANSLATE else FloatingAssistant.Tab.REPLY,
                 page?.blocks?.size ?: 0)
             when {
-                result is CaptureResult.Failure -> assistant.showError(captureMessage(result.reason), retry = false)
-                failed -> assistant.showError("这个页面没有读到文字（可能是图片或 App 不开放无障碍内容）", retry = false)
+                result is CaptureResult.Failure -> assistant.showError(captureMessage(result.reason), retry = false, screenshot = canScreenshot)
+                failed -> assistant.showError(
+                    if (canScreenshot) "这个页面没有读到文字，可以用截图翻译" else "这个页面没有读到文字（可能是图片或 App 不开放无障碍内容）",
+                    retry = false, screenshot = canScreenshot)
             }
         }
     }
@@ -143,14 +148,72 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
                 if (lines.isNotEmpty()) onMain { if (translateJob?.isActive == true) assistant.showTranslationProgress(lines) }
             }
             when (outcome) {
-                is AssistOutcome.Error -> assistant.showError(outcome.message, retry = true)
+                is AssistOutcome.Error -> assistant.showError(outcome.message, retry = true, screenshot = canScreenshot)
                 is AssistOutcome.Success -> {
                     val lines = outcome.result.translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
-                    if (lines.isEmpty()) assistant.showError("这一屏没有需要翻译的文字", retry = false)
+                    if (lines.isEmpty()) assistant.showError("这一屏没有需要翻译的文字", retry = false, screenshot = canScreenshot)
                     else assistant.showTranslations(lines, outcome.result.demo)
                 }
             }
         }
+    }
+
+    // ---------- screenshot translation (direct mode, Android 11+) ----------
+
+    private val canScreenshot get() = direct != null && Build.VERSION.SDK_INT >= 30
+    private fun model(client: OpenAIDirectClient) = prefs.openAiModel.ifBlank { client.defaultModel }
+
+    override fun onScreenshotTranslate() {
+        val client = direct
+        if (client == null || Build.VERSION.SDK_INT < 30) {
+            assistant.showError("截图翻译需要 Android 11+ 和 OpenAI 直连模式", retry = false); return
+        }
+        val pkg = foreground ?: return
+        translateJob?.cancel()
+        translateJob = scope.launch {
+            // Remove our own (FLAG_SECURE) windows so the screenshot shows only the app.
+            assistant.detachPanel()
+            delay(350)
+            val bitmap = if (foreground == pkg && !locked()) shoot() else null
+            assistant.reattachPanel()
+            if (bitmap == null) { assistant.showError("截图失败（页面可能禁止截图，或操作太频繁）", retry = false); return@launch }
+            assistant.showWorking("正在识别并翻译截图…")
+            val jpeg = withContext(Dispatchers.Default) { encodeJpeg(bitmap) }
+            val outcome = client.translateScreenshot(jpeg, prefs.translateLanguage, model(client)) { lines ->
+                if (lines.isNotEmpty()) onMain {
+                    if (translateJob?.isActive == true) assistant.showTranslationProgress(lines.map { TranslatedLine(it.original, it.translation) })
+                }
+            }
+            when (outcome) {
+                is OpenAIDirectClient.ImageOutcome.Error -> assistant.showError(outcome.message, retry = false, screenshot = true)
+                is OpenAIDirectClient.ImageOutcome.Success ->
+                    if (outcome.lines.isEmpty()) assistant.showError("截图里没有识别到需要翻译的文字", retry = false)
+                    else assistant.showTranslations(outcome.lines.map { TranslatedLine(it.original, it.translation) }, demo = false, fromScreenshot = true)
+            }
+        }
+    }
+
+    /** One accessibility screenshot of the default display, copied to a software bitmap. */
+    @androidx.annotation.RequiresApi(30)
+    private suspend fun shoot(): Bitmap? = suspendCancellableCoroutine { continuation ->
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(result: ScreenshotResult) {
+                val copy = try {
+                    Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)?.copy(Bitmap.Config.ARGB_8888, false)
+                } catch (_: Exception) { null } finally { result.hardwareBuffer.close() }
+                if (continuation.isActive) continuation.resume(copy)
+            }
+            override fun onFailure(errorCode: Int) { if (continuation.isActive) continuation.resume(null) }
+        })
+    }
+
+    /** Long side at most 1600 px, JPEG q80: legible text at a moderate upload size. Never written to disk. */
+    private fun encodeJpeg(source: Bitmap): ByteArray {
+        val scale = minOf(1f, 1600f / maxOf(source.width, source.height))
+        val scaled = if (scale < 1f) Bitmap.createScaledBitmap(source, (source.width * scale).toInt(), (source.height * scale).toInt(), true) else source
+        return java.io.ByteArrayOutputStream().use { out ->
+            scaled.compress(Bitmap.CompressFormat.JPEG, 80, out); out.toByteArray()
+        }.also { if (scaled !== source) scaled.recycle(); source.recycle() }
     }
 
     override fun onGenerateReply(intent: String, tone: String) {
@@ -182,7 +245,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
 
     /** Direct mode streams progress to [onPartial]; the proxy returns the whole result at once. */
     private suspend fun call(request: AssistRequest, onPartial: ((PartialResult) -> Unit)? = null): AssistOutcome {
-        direct?.let { return it.generate(request, prefs.openAiModel.ifBlank { it.defaultModel }, onPartial) }
+        direct?.let { return it.generate(request, model(it), onPartial) }
         val settings = withContext(Dispatchers.IO) { runCatching { ProxySettingsStore(this@InspectorService).load() }.getOrNull() }
             ?: return AssistOutcome.Error("还没配置翻译代理：打开 LinguaBridge 设置")
         return repository.generate(settings, request)

@@ -59,8 +59,8 @@ func TestRequestValidation(t *testing.T) {
 		"replyMissingIntent": func(r *Request) { r.Operation = "reply" },
 		"intentOnTranslate":  func(r *Request) { r.UserIntent = "do another task" },
 		"autoOnTranslate":    func(r *Request) { r.TargetLanguage = "auto" },
-		"toneOnTranslate":    func(r *Request) { r.Tone = "polite" },
-		"unknownTone":        func(r *Request) { r.Operation = "reply"; r.UserIntent = "ok"; r.Tone = "rude" },
+		"toneOnTranslate":    func(r *Request) { r.Tone = "formal" },
+		"unknownTone":        func(r *Request) { r.Operation = "reply"; r.UserIntent = "ok"; r.Tone = "angry" },
 		"pageWithTarget":     func(r *Request) { r.Operation = "translate_page" },
 		"pageWithIntent":     func(r *Request) { r.Operation = "translate_page"; r.TargetBlockID = ""; r.UserIntent = "x" },
 	}

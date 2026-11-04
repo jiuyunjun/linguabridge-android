@@ -17,7 +17,7 @@ class AssistantPrefs(context: Context) {
         set(value) { require(value in REPLY_LANGUAGES); preferences.edit().putString(KEY_REPLY, value).apply() }
 
     var tone: String
-        get() = preferences.getString(KEY_TONE, "polite").takeIf { it != null && it in REPLY_TONES && it.isNotEmpty() } ?: "polite"
+        get() = preferences.getString(KEY_TONE, "casual").takeIf { it != null && it in REPLY_TONES && it.isNotEmpty() } ?: "casual"
         set(value) { require(value in REPLY_TONES && value.isNotEmpty()); preferences.edit().putString(KEY_TONE, value).apply() }
 
     var bubbleEnabled: Boolean
@@ -32,6 +32,11 @@ class AssistantPrefs(context: Context) {
     var bubbleY: Float
         get() = preferences.getFloat(KEY_BUBBLE_Y, 0.55f).coerceIn(0.05f, 0.9f)
         set(value) { preferences.edit().putFloat(KEY_BUBBLE_Y, value.coerceIn(0.05f, 0.9f)).apply() }
+
+    /** Screen edge the bubble docks to: "left" or "right". */
+    var bubbleSide: String
+        get() = if (preferences.getString(KEY_BUBBLE_SIDE, "right") == "left") "left" else "right"
+        set(value) { preferences.edit().putString(KEY_BUBBLE_SIDE, if (value == "left") "left" else "right").apply() }
 
     /** Model chosen in Settings for debug direct mode; blank = openai.properties default. */
     var openAiModel: String
@@ -60,12 +65,13 @@ class AssistantPrefs(context: Context) {
         const val KEY_HIDDEN = "hiddenPackages"
         const val KEY_BUBBLE_Y = "bubbleY"
         const val KEY_MODEL = "openAiModel"
+        const val KEY_BUBBLE_SIDE = "bubbleSide"
         const val KEY_OPEN_WITH = "openWith"
         const val KEY_LAST_TAB = "lastTab"
         val OPEN_WITH = linkedMapOf("last" to "上次使用", "translate" to "翻译", "reply" to "回复")
         val TRANSLATE_LANGUAGES = listOf("zh", "ja", "en")
         val REPLY_LANGUAGES = listOf("auto", "ja", "en", "zh")
         val LANGUAGE_LABELS = mapOf("auto" to "跟随对方", "zh" to "中文", "ja" to "日语", "en" to "英语")
-        val TONE_LABELS = linkedMapOf("polite" to "礼貌", "casual" to "随意", "formal" to "正式")
+        val TONE_LABELS = linkedMapOf("formal" to "礼貌", "casual" to "平常", "snarky" to "阴阳", "rude" to "粗鲁")
     }
 }

@@ -19,6 +19,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -37,13 +39,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private val Bg = Color(0xFF0F1B33)
-private val Card = Color(0xFF172440)
-private val Line = Color(0xFF2C3A57)
-private val TextMain = Color(0xFFEAF2FF)
-private val Muted = Color(0xFFA8B7D4)
+// Same tokens as the LinguaBridge extension panel (styles.css --cnjp-*, dark).
+private val Bg = Color(0xFF081224)
+private val Card = Color(0x0EFFFFFF)
+private val Line = Color(0x29FFFFFF)
+private val TextMain = Color(0xFFEEF4FF)
+private val Muted = Color(0xB8EEF4FF)
 private val Accent = Color(0xFF5ED0FF)
-private val AccentDim = Color(0xFF19304D)
+private val AccentDim = Color(0x245ED0FF)
 private val OnAccent = Color(0xFF08233A)
 private val Ok = Color(0xFF67E3A1)
 private val Warn = Color(0xFFFFD36B)
@@ -59,7 +62,11 @@ class InspectorActivity : ComponentActivity() {
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = OnAccent, background = Bg, surface = Bg,
                 onSurface = TextMain, onBackground = TextMain, outline = Line)) {
-                Surface(Modifier.fillMaxSize(), color = Bg) { SettingsScreen() }
+                Surface(Modifier.fillMaxSize(), color = Bg) {
+                    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(Color(0x385ED0FF), Color.Transparent),
+                        center = Offset(0f, 0f), radius = 1400f)).background(Brush.radialGradient(listOf(Color(0x2E7A8FFF), Color.Transparent),
+                        center = Offset(Float.POSITIVE_INFINITY, 0f), radius = 1200f))) { SettingsScreen() }
+                }
             }
         }
     }
@@ -91,6 +98,7 @@ class InspectorActivity : ComponentActivity() {
         var model by remember { mutableStateOf(prefs.openAiModel.ifBlank { direct?.defaultModel.orEmpty() }) }
         var chooseModel by remember { mutableStateOf(false) }
         var openWith by remember { mutableStateOf(prefs.openWith) }
+        var tone by remember { mutableStateOf(prefs.tone) }
 
         LaunchedEffect(resumeEpoch) {
             enabled = serviceEnabled()
@@ -146,7 +154,7 @@ class InspectorActivity : ComponentActivity() {
                             } catch (invalid: IllegalArgumentException) { invalid.message ?: "配置无效" }
                             catch (_: Exception) { "无法安全保存配置" }
                         }
-                    }, Modifier.fillMaxWidth().height(48.dp).testTag("save-proxy"), shape = RoundedCornerShape(12.dp)) { Text("保存代理配置") }
+                    }, Modifier.fillMaxWidth().height(44.dp).testTag("save-proxy"), shape = RoundedCornerShape(9.dp)) { Text("保存代理配置") }
                 }
             }
 
@@ -157,13 +165,21 @@ class InspectorActivity : ComponentActivity() {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AssistantPrefs.OPEN_WITH.forEach { (id, name) ->
                         FilterChip(id == openWith, { openWith = id; prefs.openWith = id }, label = { Text(name) },
-                            modifier = Modifier.testTag("open-$id"), shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.testTag("open-$id"), shape = RoundedCornerShape(9.dp),
                             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentDim, selectedLabelColor = Accent, labelColor = TextMain))
                     }
                 }
                 Text("只回复时不会请求翻译；切到“翻译”标签才翻译。", color = Muted, fontSize = 12.sp)
                 Text("回复用", fontWeight = FontWeight.Medium)
                 ChipRow(AssistantPrefs.REPLY_LANGUAGES, replyLanguage, "reply") { replyLanguage = it; prefs.replyLanguage = it }
+                Text("回复语气", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AssistantPrefs.TONE_LABELS.forEach { (id, name) ->
+                        FilterChip(id == tone, { tone = id; prefs.tone = id }, label = { Text(name) },
+                            modifier = Modifier.testTag("tone-$id"), shape = RoundedCornerShape(9.dp),
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentDim, selectedLabelColor = Accent, labelColor = TextMain))
+                    }
+                }
             }
 
             Section {
@@ -199,7 +215,7 @@ class InspectorActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) { store.clear(); prefs.clear(); FixtureExporter.clear(this@InspectorActivity) }
                         settings = null; baseUrl = ""; translateLanguage = prefs.translateLanguage; replyLanguage = prefs.replyLanguage
                         bubbleEnabled = prefs.bubbleEnabled; hidden = prefs.hiddenPackages
-                        model = direct?.defaultModel.orEmpty(); openWith = prefs.openWith
+                        model = direct?.defaultModel.orEmpty(); openWith = prefs.openWith; tone = prefs.tone
                         "本机配置和导出已清空"
                     } catch (_: Exception) { "部分数据清理失败，可在系统中清除应用数据" }
                 }
@@ -268,7 +284,7 @@ class InspectorActivity : ComponentActivity() {
 
     @Composable
     private fun Section(content: @Composable ColumnScope.() -> Unit) {
-        Column(Modifier.fillMaxWidth().background(Card, RoundedCornerShape(16.dp)).border(1.dp, Line, RoundedCornerShape(16.dp))
+        Column(Modifier.fillMaxWidth().background(Card, RoundedCornerShape(12.dp)).border(1.dp, Line, RoundedCornerShape(12.dp))
             .padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp), content = content)
     }
 
@@ -286,7 +302,8 @@ class InspectorActivity : ComponentActivity() {
 
     @Composable
     private fun SmallButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-        OutlinedButton(onClick, modifier.heightIn(min = 40.dp), shape = RoundedCornerShape(10.dp),
+        OutlinedButton(onClick, modifier.heightIn(min = 40.dp), shape = RoundedCornerShape(9.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Line),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = TextMain)) { Text(text, fontSize = 13.sp) }
     }
 
@@ -295,7 +312,7 @@ class InspectorActivity : ComponentActivity() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             options.forEach { id ->
                 FilterChip(id == selected, { onSelect(id) }, label = { Text(AssistantPrefs.LANGUAGE_LABELS.getValue(id)) },
-                    modifier = Modifier.testTag("$tagPrefix-$id"), shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier.testTag("$tagPrefix-$id"), shape = RoundedCornerShape(9.dp),
                     colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentDim, selectedLabelColor = Accent, labelColor = TextMain))
             }
         }

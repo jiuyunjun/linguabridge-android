@@ -82,7 +82,8 @@ fun takeUtf8(value: String, byteLimit: Int): String {
 
 enum class AssistOperation { TRANSLATE, TRANSLATE_PAGE, REPLY }
 
-val REPLY_TONES = setOf("", "polite", "casual", "formal")
+/** Same tone ids as the LinguaBridge extension. */
+val REPLY_TONES = setOf("", "formal", "casual", "snarky", "rude")
 data class AssistRequest(
     val requestId: String = UUID.randomUUID().toString(),
     val operation: AssistOperation,

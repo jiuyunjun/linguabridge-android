@@ -66,7 +66,7 @@ func (r Request) Validate() error {
 		return invalid
 	}
 	switch r.Tone {
-	case "", "polite", "casual", "formal":
+	case "", "formal", "casual", "snarky", "rude": // same ids as the LinguaBridge extension
 	default:
 		return invalid
 	}

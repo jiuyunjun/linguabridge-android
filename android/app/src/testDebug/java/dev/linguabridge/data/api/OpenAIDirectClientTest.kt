@@ -18,7 +18,7 @@ class OpenAIDirectClientTest {
     )
     private fun page() = AssistRequest(operation = AssistOperation.TRANSLATE_PAGE, targetLanguage = "zh", pageType = "auto",
         sourcePackage = "jp.naver.line.android", targetBlockId = "", userIntent = "", blocks = blocks)
-    private fun reply() = page().copy(operation = AssistOperation.REPLY, targetLanguage = "auto", userIntent = "可以", tone = "polite")
+    private fun reply() = page().copy(operation = AssistOperation.REPLY, targetLanguage = "auto", userIntent = "可以", tone = "formal")
 
     private fun envelope(modelJson: String, status: String = "completed"): String {
         val half = modelJson.length / 2
@@ -63,7 +63,7 @@ class OpenAIDirectClientTest {
         val result = client.generate(reply())
         assertEquals("承知しました。", (result as AssistOutcome.Success).result.text)
         val authoring = JSONObject(server.takeRequest().body.readUtf8()).getJSONArray("input").getJSONObject(0).getString("content")
-        assertTrue(authoring.contains("\"tone\":\"polite\"") && authoring.contains("\"targetLanguage\":\"auto\""))
+        assertTrue(authoring.contains("\"tone\":\"formal\"") && authoring.contains("\"targetLanguage\":\"auto\""))
     }
 
     @Test fun errorsAreRecoverableAndNeverEchoBodies() = withServer { server, client ->

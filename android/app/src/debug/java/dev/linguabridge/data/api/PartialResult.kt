@@ -13,6 +13,13 @@ data class PartialResult(val text: String, val translations: List<BlockTranslati
 object PartialJson {
     private val translationItem = Regex("""\{\s*"id"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}""")
 
+    private val imageItem = Regex("""\{\s*"original"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"translation"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}""")
+
+    /** Completed {original, translation} items of a streaming screenshot translation. */
+    fun items(buffer: String): List<Pair<String, String>> = imageItem.findAll(buffer).map {
+        readString(it.groupValues[1] + "\"", 0) to readString(it.groupValues[2] + "\"", 0)
+    }.toList()
+
     fun extract(buffer: String): PartialResult {
         val text = Regex(""""text"\s*:\s*"""").find(buffer)?.let { readString(buffer, it.range.last + 1) }.orEmpty()
         val start = buffer.indexOf("\"translations\"")

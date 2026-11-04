@@ -505,3 +505,10 @@ Go 使用标准库，认证常量时间比较，48KiB 请求体、字段/计数/
 - 点悬浮球只在本地读取屏幕并打开面板；翻译改为懒加载，只有翻译标签可见时才请求 `translate_page`。面板默认打开上次使用的标签，可在设置固定为翻译或回复；回复标签自动聚焦输入框并弹出键盘，显示已读取的上下文段数。翻译与回复使用独立任务，互不阻塞。
 - 调试直连模式下可从 `/v1/models` 拉取模型列表（名称规则过滤出聊天模型），在设置中切换，选择保存在本机并覆盖 `openai.properties` 的默认值。
 - 直连模式使用 Responses 流式输出（SSE）：从 `response.output_text.delta` 累积的不完整 JSON 中只提取展示用进度（回复草稿文字、已完整的翻译条目），最终仍以 `response.completed` 的完整对象经 `parseAssistResult` 校验；拒绝、失败、截断、中断均为可恢复错误。代理模式仍一次性返回。
+
+### 15.7 与 LinguaBridge 扩展统一、截图翻译、低侵入悬浮球（2026-11-04）
+
+- **视觉**：面板与设置页使用扩展 `styles.css` 深色主题令牌（--cnjp-bg rgba(8,18,36,.9) 加青/紫角落光晕、16% 白色细边框、12dp 区块、9dp 描边按钮、11sp 标签、状态栏按 loading/ok/warn/error 着色）；面板头部显示 LinguaBridge 品牌；应用图标与悬浮球使用扩展图标。
+- **语气**：与扩展相同的 id 与提示词语义：礼貌 formal / 平常 casual（默认）/ 阴阳 snarky / 粗鲁 rude；Go 代理与 Android 校验同步更新。
+- **悬浮球**：40dp 品牌图标；空闲 1.8 秒后半隐藏贴边并半透明；可拖到左/右边缘，记住边与高度；长按临时隐藏。遮罩降为 20% 透明度。
+- **截图翻译**（直连模式、Android 11+）：翻译结果页或“没有读到文字”时可点“截图翻译”。服务先移除自身 FLAG_SECURE 窗口，`AccessibilityService.takeScreenshot` 截一次当前屏幕，长边缩到 1600px、JPEG q80，仅在内存中经 Responses `input_image` 发送（`store:false`），流式返回 {original, translation} 列表并严格校验。截图包含屏幕上所有可见内容（含通知栏等），比文字模式上传更多信息；开启 FLAG_SECURE 的页面截图为黑屏。代理模式暂不支持截图。

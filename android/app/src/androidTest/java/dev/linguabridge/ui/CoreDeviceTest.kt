@@ -36,7 +36,7 @@ class CoreDeviceTest {
         for (operation in AssistOperation.entries) {
             val input = AssistRequest(operation = operation, targetLanguage = "ja", pageType = "email", sourcePackage = page.sourcePackage,
                 targetBlockId = if (operation == AssistOperation.TRANSLATE) "b3" else "",
-                tone = if (operation == AssistOperation.REPLY) "polite" else "",
+                tone = if (operation == AssistOperation.REPLY) "formal" else "",
                 userIntent = if (operation == AssistOperation.REPLY) "Politely follow up next week without inventing a date" else "", blocks = page.blocks)
             val result = repository.generate(settings, input)
             assertTrue((result as? AssistOutcome.Error)?.message ?: "expected authenticated demo result", result is AssistOutcome.Success)

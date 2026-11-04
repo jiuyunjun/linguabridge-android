@@ -85,9 +85,9 @@ class PageAssistanceTest {
         page.validate()
         assertThrows(IllegalArgumentException::class.java) { page.copy(targetBlockId = "b1").validate() }
         assertThrows(IllegalArgumentException::class.java) { page.copy(targetLanguage = "auto").validate() }
-        assertThrows(IllegalArgumentException::class.java) { page.copy(tone = "polite").validate() }
+        assertThrows(IllegalArgumentException::class.java) { page.copy(tone = "formal").validate() }
         val reply = request().copy(operation = AssistOperation.REPLY, targetBlockId = "", userIntent = "可以", targetLanguage = "auto", tone = "casual")
         reply.validate()
-        assertThrows(IllegalArgumentException::class.java) { reply.copy(tone = "rude").validate() }
+        assertThrows(IllegalArgumentException::class.java) { reply.copy(tone = "angry").validate() }
     }
 }
