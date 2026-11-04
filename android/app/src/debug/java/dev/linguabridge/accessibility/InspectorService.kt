@@ -89,7 +89,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
         // Keyboards, the system shade/lock screen and our own overlay windows don't change which
         // app is in front; re-check visibility (e.g. keyguard) without switching the target.
         val ownActivity = pkg == packageName && event.className?.toString()?.startsWith("dev.linguabridge.") == true
-        if (pkg in inputMethods || pkg == "com.android.systemui" || (pkg == packageName && !ownActivity)) { refreshBubble(); return }
+        if (pkg in inputMethods || pkg in transientSystemWindows || (pkg == packageName && !ownActivity)) { refreshBubble(); return }
         if (pkg != foreground) {
             foreground = pkg
             hiddenUntilSwitch = null
@@ -368,6 +368,12 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     }
 
     companion object {
+        /**
+         * Windows that briefly cover the app without replacing it. The HyperOS screenshot
+         * animation (com.miui.screenshot, verified on Xiaomi 25128PNA1C) takes focus; treating it
+         * as an app switch hid the bubble, and no event re-showed it when the app regained focus.
+         */
+        private val transientSystemWindows = setOf("com.android.systemui", "com.miui.screenshot")
         private var serviceReference = WeakReference<InspectorService>(null)
         var instance: InspectorService?
             get() = serviceReference.get()
