@@ -2,7 +2,7 @@ package dev.linguabridge.domain
 
 import java.util.UUID
 
-enum class PageSource { ACCESSIBILITY, SYNTHETIC, MANUAL }
+enum class PageSource { ACCESSIBILITY, SYNTHETIC, MANUAL, SCREENSHOT }
 
 data class CaptureTarget(val packageName: String, val label: String = packageName) {
     init { require(isAllowedPackage(packageName)) { "请选择普通内容应用" } }
@@ -56,6 +56,17 @@ object PageContext {
             text.isNotEmpty() && !nonLanguage.matches(text) && seen.add(node.bounds to text)
         }.map { it.copy(description = null) }
         return from(snapshot.copy(nodes = nodes))
+    }
+
+    /**
+     * Context from screenshot-recognized text (top-to-bottom order as returned by the model).
+     * No real node bounds exist, so bounds are synthetic and only encode order.
+     */
+    fun fromScreenshotTexts(sourcePackage: String, texts: List<String>): ReviewedPage {
+        val nodes = texts.map { it.trim() }.filter { it.isNotEmpty() && !nonLanguage.matches(it) }.mapIndexed { i, text ->
+            InspectedNode("s/$i", "s", "screenshot.Text", null, NodeBounds(0, i, 1, i + 1), text, null)
+        }
+        return from(UiSnapshot(System.currentTimeMillis(), -1, nodes, false, sourcePackage = sourcePackage, source = PageSource.SCREENSHOT))
     }
 
     fun sampleMail(): UiSnapshot = UiSnapshot(System.currentTimeMillis(), -1, listOf(

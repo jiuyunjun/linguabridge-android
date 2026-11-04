@@ -90,4 +90,13 @@ class PageAssistanceTest {
         reply.validate()
         assertThrows(IllegalArgumentException::class.java) { reply.copy(tone = "angry").validate() }
     }
+
+    @Test fun screenshotTextBecomesOrderedReplyContextWithRepeatsKept() {
+        val page = PageContext.fromScreenshotTexts("jp.naver.line.android", listOf("Hello", "  ", "12:30", "OK", "OK", "See you"))
+        assertEquals(PageSource.SCREENSHOT, page.source)
+        assertEquals("jp.naver.line.android", page.sourcePackage)
+        assertEquals(listOf("Hello", "OK", "OK", "See you"), page.blocks.map { it.text })
+        assertEquals(listOf("b1", "b2", "b3", "b4"), page.blocks.map { it.id })
+        assertTrue(PageContext.fromScreenshotTexts("x", List(200) { "line $it" }).blocks.size <= PageContext.MAX_BLOCKS)
+    }
 }

@@ -171,7 +171,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
         val pkg = foreground ?: return
         translateJob?.cancel()
         translateJob = scope.launch {
-            // Remove our own (FLAG_SECURE) windows so the screenshot shows only the app.
+            // Remove our own panel window so the screenshot shows only the app.
             assistant.detachPanel()
             delay(350)
             val bitmap = if (foreground == pkg && !locked()) shoot() else null
@@ -188,7 +188,12 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
                 is OpenAIDirectClient.ImageOutcome.Error -> assistant.showError(outcome.message, retry = false, screenshot = true)
                 is OpenAIDirectClient.ImageOutcome.Success ->
                     if (outcome.lines.isEmpty()) assistant.showError("截图里没有识别到需要翻译的文字", retry = false)
-                    else assistant.showTranslations(outcome.lines.map { TranslatedLine(it.original, it.translation) }, demo = false, fromScreenshot = true)
+                    else {
+                        // Screenshot-recognized text becomes the reply context (replaces the a11y read).
+                        if (foreground == pkg) PageContext.fromScreenshotTexts(pkg, outcome.lines.map { it.original })
+                            .takeIf { it.blocks.isNotEmpty() }?.let { page = it; assistant.setContextBlocks(it.blocks.size) }
+                        assistant.showTranslations(outcome.lines.map { TranslatedLine(it.original, it.translation) }, demo = false, fromScreenshot = true)
+                    }
             }
         }
     }

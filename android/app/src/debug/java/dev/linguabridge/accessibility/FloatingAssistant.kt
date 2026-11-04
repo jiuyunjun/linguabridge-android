@@ -178,6 +178,12 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     private var replyView: (() -> Unit)? = null
     private var contextBlocks = 0
 
+    /** Context replaced while the panel is open (screenshot translation): the reply tab re-renders with it. */
+    fun setContextBlocks(blocks: Int) {
+        contextBlocks = blocks
+        replyView = null
+    }
+
     /** Opens on [initial]; nothing is uploaded until a tab asks for it. */
     fun openPanel(initial: Tab, blocks: Int) {
         if (panel != null) return
@@ -509,10 +515,13 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
 
     private fun smallParams() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply { marginStart = dp(6) }
 
+    /**
+     * No FLAG_SECURE (user choice): on many ROMs any secure window on screen makes system
+     * screenshots fail, so the bubble and panel stay screenshot-able.
+     */
     private fun overlayParams(width: Int, height: Int, focusable: Boolean) = WindowManager.LayoutParams(
         width, height, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-        (if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or
-            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_SECURE,
+        (if (focusable) 0 else WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
         PixelFormat.TRANSLUCENT,
     )
 
