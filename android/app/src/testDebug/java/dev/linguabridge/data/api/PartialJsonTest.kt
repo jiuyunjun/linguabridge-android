@@ -14,10 +14,14 @@ class PartialJsonTest {
         assertEquals("done", PartialJson.extract("""{"text":"done","notes":"n"""").text)
     }
 
-    @Test fun onlyCompletedTranslationItemsAreReturned() {
+    @Test fun completedItemsPlusTheOneBeingWritten() {
         val partial = """{"text":"","notes":"","needsClarification":false,"questions":[],"translations":[{"id":"b1","text":"一"},{"id":"b2","text":"二\"引"},{"id":"b3","text":"未完"""
         val result = PartialJson.extract(partial)
         assertEquals("", result.text)
-        assertEquals(listOf("b1" to "一", "b2" to "二\"引"), result.translations.map { it.id to it.text })
+        assertEquals(listOf("b1" to "一", "b2" to "二\"引", "b3" to "未完"), result.translations.map { it.id to it.text })
+        // An item whose id is still being written, or whose text has not started, is not shown.
+        assertEquals(2, PartialJson.extract(partial.substringBefore("{\"id\":\"b3") + "{\"id\":\"b").translations.size)
+        assertEquals(2, PartialJson.extract(partial.substringBefore("未完")).translations.size)
+        assertEquals(listOf("o" to "部分"), PartialJson.items("""{"notes":"","items":[{"original":"o","translation":"部分"""))
     }
 }

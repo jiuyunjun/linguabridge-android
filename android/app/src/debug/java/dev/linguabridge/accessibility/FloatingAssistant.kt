@@ -17,6 +17,8 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -165,6 +167,8 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     private var replyTab: TextView? = null
     private var status: TextView? = null
     private var content: LinearLayout? = null
+    private var scrollView: ScrollView? = null
+    private var sheetView: View? = null
     private var footer: LinearLayout? = null
     private var intentInput: EditText? = null
     private var translatedText = ""
@@ -216,7 +220,12 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
         sheet.addView(status)
 
         content = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), dp(10), dp(10), 0) }
-        val scroll = ScrollView(context).apply { addView(content) }
+        val scroll = ScrollView(context).apply {
+            addView(content)
+            // A manual scroll stops auto-follow for the rest of this stream.
+            setOnTouchListener { _, event -> if (event.actionMasked == MotionEvent.ACTION_MOVE) followStream = false; false }
+        }
+        scrollView = scroll
         val maxHeight = (metrics.heightPixels * 0.55f).toInt()
         sheet.addView(object : FrameLayout(context) {
             override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -237,8 +246,13 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
             softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
         }
         windows.addView(scrim, params)
-        panel = scrim; panelParams = params; panelDetached = false
+        panel = scrim; panelParams = params; panelDetached = false; sheetView = sheet
         renderTabs()
+        // Slide up from the bottom edge, scrim fades in.
+        scrim.alpha = 0f
+        scrim.animate().alpha(1f).setDuration(180).start()
+        sheet.translationY = metrics.heightPixels * 0.4f
+        sheet.animate().translationY(0f).setDuration(260).setInterpolator(DecelerateInterpolator(1.6f)).start()
     }
 
     /** Temporarily removes the panel window (e.g. for a clean screenshot) without losing its state. */
@@ -260,10 +274,17 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     fun closePanel() {
         val view = panel ?: return
         intentInput?.let { context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(it.windowToken, 0) }
-        if (!panelDetached) runCatching { windows.removeView(view) }
-        panel = null; panelParams = null; panelDetached = false
-        content = null; footer = null; status = null; intentInput = null; streamTextView = null
-        translatedText = ""; replyText = ""; replyNotes = ""; translateView = null; replyView = null; streamedLines = -1
+        val sheet = sheetView
+        if (!panelDetached) {
+            // Slide down, then remove the window. State is reset immediately so a new panel can open.
+            view.isEnabled = false
+            view.animate().alpha(0f).setDuration(160).start()
+            (sheet ?: view).animate().translationY(metrics.heightPixels * 0.3f).setDuration(160)
+                .setInterpolator(AccelerateInterpolator()).withEndAction { runCatching { windows.removeView(view) } }.start()
+        }
+        panel = null; panelParams = null; panelDetached = false; sheetView = null; scrollView = null
+        content = null; footer = null; status = null; intentInput = null; streamTextView = null; lineViews.clear()
+        translatedText = ""; replyText = ""; replyNotes = ""; translateView = null; replyView = null
         listener.onPanelClosed()
     }
 
@@ -280,7 +301,7 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
             val view = translateView
             if (view != null) view() else { showStatus("正在翻译当前屏幕…", ACCENT); clear(); listener.onTranslateNeeded() }
         } else {
-            (replyView ?: ::renderReplyForm)()
+            (replyView ?: { renderReplyForm() })()
             if (replyText.isEmpty()) focusIntent()
         }
     }
@@ -295,60 +316,77 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
 
     // ---------- translate tab ----------
 
-    /** Line cards currently shown by a streaming translation render; -1 when not streaming. */
-    private var streamedLines = -1
+    /** Translation TextViews of the cards on screen, in order (updated in place while streaming). */
+    private val lineViews = mutableListOf<TextView>()
 
     fun showWorking(message: String) {
-        streamedLines = -1
+        lineViews.clear(); followStream = true
         translateView = { showStatus(message, ACCENT); clear() }
         if (tab == Tab.TRANSLATE) translateView!!()
     }
 
-    private fun addLineCard(line: TranslatedLine) {
-        content?.addView(block().apply {
-            addView(label(line.original, 13f, MUTED))
-            addView(label(line.translation, 15f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) })
-        }, blockParams())
+    private fun addLineCard(line: TranslatedLine, animate: Boolean = false): TextView {
+        val translation = label(line.translation, 15f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) }
+        val card = block().apply { addView(label(line.original, 13f, MUTED)); addView(translation) }
+        content?.addView(card, blockParams())
+        if (animate) appear(card)
+        return translation
     }
 
-    /** Streaming: completed translations so far. Appends only new cards while the tab is visible. */
-    fun showTranslationProgress(lines: List<TranslatedLine>) {
-        val text = "翻译中… 已完成 ${lines.size} 段"
-        translateView = {
-            showStatus(text, ACCENT); clear(); lines.forEach(::addLineCard)
-            footerButtons(button("关闭") { closePanel() })
-            streamedLines = lines.size
+    /** Static render used when the tab is (re)shown; registers the cards so streaming can continue in place. */
+    private fun renderLines(lines: List<TranslatedLine>) {
+        lineViews.clear(); content?.removeAllViews()
+        lines.forEach { lineViews += addLineCard(it) }
+    }
+
+    /** New cards fade in with an empty translation that types out; existing cards keep typing toward the new text. */
+    private fun streamLines(lines: List<TranslatedLine>) {
+        while (lineViews.size > lines.size) {
+            val stale = lineViews.removeAt(lineViews.lastIndex)
+            (stale.parent as? View)?.let { card -> content?.removeView(card) }
         }
-        if (tab != Tab.TRANSLATE) { streamedLines = -1; return }
-        if (streamedLines in 0..lines.size) {
-            lines.drop(streamedLines).forEach(::addLineCard); streamedLines = lines.size; showStatus(text, ACCENT)
-        } else translateView!!()
+        lines.forEachIndexed { i, line ->
+            val view = lineViews.getOrNull(i) ?: addLineCard(line.copy(translation = ""), animate = true).also { lineViews += it }
+            typewriter(view).update(line.translation)
+        }
+        followScroll()
+    }
+
+    /** Streaming: translations so far (the last one may still be growing). */
+    fun showTranslationProgress(lines: List<TranslatedLine>) {
+        val text = "翻译中… ${lines.size} 段"
+        translateView = { showStatus(text, ACCENT); renderLines(lines); footerButtons(button("关闭") { closePanel() }) }
+        if (tab != Tab.TRANSLATE) return
+        showStatus(text, ACCENT)
+        if (lineViews.isEmpty()) { clear(); footerButtons(button("关闭") { closePanel() }) }
+        streamLines(lines)
     }
 
     fun showTranslations(lines: List<TranslatedLine>, demo: Boolean, fromScreenshot: Boolean = false) {
-        streamedLines = -1
         translatedText = lines.joinToString("\n") { it.translation }
-        translateView = {
+        val done = {
             showStatus(when {
                 demo -> "固定模拟结果 · 未调用 OpenAI"
                 fromScreenshot -> "截图翻译完成 · ${lines.size} 段"
                 else -> "翻译完成 · ${lines.size} 段"
             }, if (demo) WARN else OK)
-            clear()
-            lines.forEach(::addLineCard)
             footerButtons(
                 button("截图翻译") { listener.onScreenshotTranslate() },
                 button("复制") { listener.onCopy(translatedText) },
                 button("回复", primary = true) { selectTab(Tab.REPLY) },
             )
         }
-        if (tab == Tab.TRANSLATE) translateView!!()
+        translateView = { renderLines(lines); done() }
+        if (tab != Tab.TRANSLATE) return
+        if (lineViews.isEmpty()) clear() // nothing streamed (proxy mode): cards still animate in
+        streamLines(lines)
+        done()
     }
 
     /** [screenshot] offers screenshot translation, e.g. when the app exposes no text. */
     fun showError(message: String, retry: Boolean, screenshot: Boolean = false) {
-        streamedLines = -1
         val view = {
+            lineViews.clear()
             showStatus(message, ERROR); clear()
             val buttons = mutableListOf(button("关闭") { closePanel() })
             if (screenshot) buttons += button("截图翻译", primary = !retry) { listener.onScreenshotTranslate() }
@@ -360,7 +398,7 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
 
     // ---------- reply tab ----------
 
-    private fun renderReplyForm() {
+    private fun renderReplyForm(animateDraft: Boolean = false) {
         streamTextView = null
         val language = AssistantPrefs.LANGUAGE_LABELS[prefs.replyLanguage]
         showStatus(if (contextBlocks > 0) "已读取屏幕 $contextBlocks 段作为上下文 · → $language" else "没有屏幕上下文 · → $language")
@@ -380,7 +418,15 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
             tones.addView(button(name) { prefs.tone = id; renderReplyForm() }.also { styleButton(it, prefs.tone == id) }, smallParams())
         }
         content?.addView(HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled = false; addView(tones) }, blockParams())
-        if (replyText.isNotEmpty()) addReplyCard(replyText, replyNotes)
+        if (replyText.isNotEmpty()) {
+            val body = addDraftCard(if (animateDraft) "" else replyText, animateDraft)
+            if (animateDraft) typewriter(body).update(replyText)
+            addNotes(body, animateDraft)
+        }
+        replyFooter()
+    }
+
+    private fun replyFooter() {
         val buttons = mutableListOf<TextView>()
         if (replyText.isNotEmpty()) {
             buttons += button("重写") { generate() }
@@ -397,47 +443,57 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     }
 
     fun showReplyWorking() {
-        replyText = ""; replyNotes = ""
+        replyText = ""; replyNotes = ""; followStream = true
         replyView = { renderReplyForm(); showStatus("正在生成回复…", ACCENT) }
         if (tab == Tab.REPLY) replyView!!()
     }
 
     private var streamTextView: TextView? = null
 
-    /** Streaming: the draft so far. Updates the draft text in place to avoid re-creating the input box. */
+    private fun addDraftCard(text: String, animate: Boolean): TextView {
+        val body = label(text, 16f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) }
+        val card = block().apply { addView(label("回复草稿", 11f, MUTED)); addView(body) }
+        content?.addView(card, blockParams())
+        if (animate) appear(card)
+        return body
+    }
+
+    private fun addNotes(body: TextView, animate: Boolean) {
+        if (replyNotes.isBlank()) return
+        val notes = label(replyNotes, 12f, MUTED).apply { setPadding(0, dp(8), 0, 0) }
+        (body.parent as? LinearLayout)?.addView(notes)
+        if (animate) appear(notes)
+    }
+
+    /** Streaming: the draft so far. The draft card fades in once, then its text types out in place. */
     fun showReplyProgress(text: String) {
-        replyView = {
-            renderReplyForm(); showStatus("生成中…", ACCENT)
-            content?.addView(block().apply {
-                addView(label("回复草稿", 11f, MUTED))
-                addView(label(text, 16f, TEXT).apply { setPadding(0, dp(4), 0, 0) }.also { streamTextView = it })
-            }, blockParams())
-        }
+        replyView = { renderReplyForm(); showStatus("生成中…", ACCENT); streamTextView = addDraftCard(text, animate = false) }
         if (tab != Tab.REPLY) return
-        val view = streamTextView
-        if (view != null && view.isAttachedToWindow) view.text = text else replyView!!()
+        val current = streamTextView?.takeIf { it.isAttachedToWindow }
+            ?: run { showStatus("生成中…", ACCENT); addDraftCard("", animate = true).also { streamTextView = it } }
+        typewriter(current).update(text)
     }
 
     fun showReply(text: String, notes: String, questions: List<String>, demo: Boolean) {
         replyText = text
         replyNotes = (listOf(notes) + questions.map { "• $it" }).filter { it.isNotBlank() }.joinToString("\n")
-        replyView = {
-            renderReplyForm()
+        val status = {
             when {
                 demo -> showStatus("固定模拟结果 · 未调用 OpenAI", WARN)
                 questions.isNotEmpty() -> showStatus("需要你补充信息，草稿仅供参考", WARN)
                 else -> showStatus("已生成 · 不会自动发送", OK)
             }
         }
-        if (tab == Tab.REPLY) replyView!!()
-    }
-
-    private fun addReplyCard(text: String, notes: String) {
-        content?.addView(block().apply {
-            addView(label("回复草稿", 11f, MUTED))
-            addView(label(text, 16f, TEXT).apply { setPadding(0, dp(4), 0, 0); setTextIsSelectable(true) })
-            if (notes.isNotBlank()) addView(label(notes, 12f, MUTED).apply { setPadding(0, dp(8), 0, 0) })
-        }, blockParams())
+        replyView = { renderReplyForm(); status() }
+        if (tab != Tab.REPLY) return
+        val live = streamTextView?.takeIf { it.isAttachedToWindow }
+        if (live != null) {
+            // Finish the streamed card in place: no rebuild, no jump.
+            typewriter(live).update(text)
+            addNotes(live, animate = true)
+            replyFooter()
+        } else renderReplyForm(animateDraft = true)
+        status()
     }
 
     fun showStatus(message: String, color: Int = MUTED) { status?.text = message; status?.setTextColor(color) }
@@ -508,6 +564,56 @@ class FloatingAssistant(private val context: Context, private val prefs: Assista
     private fun dp(value: Int) = (value * metrics.density).toInt()
 
     fun destroy() { closePanel(); hideBubble() }
+
+    // ---------- motion ----------
+
+    /** New blocks fade in and rise a little instead of popping in. */
+    private fun appear(view: View) {
+        view.alpha = 0f; view.translationY = dp(10).toFloat()
+        view.animate().alpha(1f).translationY(0f).setDuration(220).setInterpolator(DecelerateInterpolator()).start()
+    }
+
+    /**
+     * Reveals streamed text a few characters per frame instead of jumping by network chunks.
+     * The step grows with the backlog, so it never falls far behind the model.
+     */
+    private inner class Typewriter(private val view: TextView) : Runnable {
+        private var target = ""
+        private var shown = 0
+        private var running = false
+
+        /** The view already shows [text] (e.g. a static re-render): continue from there. */
+        fun startFrom(text: String) { target = text; shown = text.length }
+
+        fun update(text: String) {
+            // Keep what is already on screen if the new text extends it; otherwise restart at the common prefix.
+            if (!text.startsWith(target.substring(0, shown))) shown = text.commonPrefixWith(target.substring(0, shown)).length
+            target = text
+            if (!running && shown < target.length) { running = true; view.postOnAnimation(this) }
+        }
+
+        override fun run() {
+            val backlog = target.length - shown
+            if (backlog <= 0 || !view.isAttachedToWindow) { running = false; return }
+            shown += maxOf(1, backlog / 8).coerceAtMost(backlog)
+            if (shown < target.length && Character.isLowSurrogate(target[shown])) shown++ // never split an emoji
+            view.text = target.substring(0, shown)
+            followScroll()
+            view.postOnAnimation(this)
+        }
+    }
+
+    private fun typewriter(view: TextView): Typewriter =
+        (view.getTag(R.id.lb_typewriter) as? Typewriter) ?: Typewriter(view).also { it.startFrom(view.text.toString()); view.setTag(R.id.lb_typewriter, it) }
+
+    /** While streaming, keep the newest text in view until the user scrolls by hand. */
+    private var followStream = true
+    private fun followScroll() {
+        if (!followStream) return
+        val scroll = scrollView ?: return
+        val inner = content ?: return
+        scroll.post { scroll.scrollTo(0, maxOf(0, inner.height - scroll.height)) }
+    }
 
     private companion object {
         // Tokens from translator-ext styles.css (dark): --cnjp-bg rgba(8,18,36,.9), --cnjp-line rgba(255,255,255,.16) …

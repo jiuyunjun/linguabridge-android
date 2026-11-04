@@ -105,7 +105,16 @@ class InspectorActivity : ComponentActivity() {
             val loaded = withContext(Dispatchers.IO) { runCatching { store.load() }.getOrNull() }
             settings = loaded; baseUrl = loaded?.baseUrl.orEmpty(); tokenInput = ""
         }
-        LaunchedEffect(Unit) {
+        // Loading every launcher app's label is heavy (resources + GC) and made the first scroll janky:
+        // only do it when the "add hidden app" dialog is opened. Hidden apps' own labels are cheap.
+        var hiddenLabels by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+        LaunchedEffect(hidden) {
+            hiddenLabels = withContext(Dispatchers.IO) {
+                hidden.associateWith { pkg -> runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() }.getOrDefault(pkg) }
+            }
+        }
+        LaunchedEffect(chooseApp) {
+            if (!chooseApp || apps.isNotEmpty()) return@LaunchedEffect
             val keyboards = getSystemService(InputMethodManager::class.java).inputMethodList.map { it.packageName }.toSet()
             apps = withContext(Dispatchers.IO) {
                 packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
@@ -114,7 +123,7 @@ class InspectorActivity : ComponentActivity() {
                     .distinctBy { it.packageName }.sortedBy { it.label.lowercase() }
             }
         }
-        fun label(pkg: String) = apps.firstOrNull { it.packageName == pkg }?.label ?: pkg
+        fun label(pkg: String) = hiddenLabels[pkg] ?: pkg
 
         Column(Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp).testTag("settings"),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -271,6 +280,9 @@ class InspectorActivity : ComponentActivity() {
             AlertDialog(onDismissRequest = { chooseApp = false }, title = { Text("在这些 App 中不显示悬浮球") }, text = {
                 Column {
                     OutlinedTextField(search, { search = it }, label = { Text("搜索应用") }, singleLine = true)
+                    if (apps.isEmpty()) Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Text("  正在读取应用列表…", color = Muted)
+                    }
                     LazyColumn(Modifier.heightIn(max = 360.dp)) {
                         items(apps.filter { it.packageName !in hidden && (search.isBlank() || it.label.contains(search, true)) }, key = { it.packageName }) { app ->
                             TextButton({ hidden = hidden + app.packageName; prefs.hiddenPackages = hidden; chooseApp = false },

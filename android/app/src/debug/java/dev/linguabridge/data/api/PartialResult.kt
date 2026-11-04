@@ -11,21 +11,38 @@ data class PartialResult(val text: String, val translations: List<BlockTranslati
  * re-validated with [parseAssistResult] once the stream completes.
  */
 object PartialJson {
-    private val translationItem = Regex("""\{\s*"id"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}""")
+    /** A complete JSON string literal; group 1 is its raw (still escaped) body. */
+    private const val STR = """"((?:[^"\\]|\\.)*)""""
+    private val translationItem = Regex("""\{\s*"id"\s*:\s*$STR\s*,\s*"text"\s*:\s*$STR\s*\}""")
+    private val translationOpen = Regex("""\{\s*"id"\s*:\s*$STR\s*,\s*"text"\s*:\s*"""")
+    private val imageItem = Regex("""\{\s*"original"\s*:\s*$STR\s*,\s*"translation"\s*:\s*$STR\s*\}""")
+    private val imageOpen = Regex("""\{\s*"original"\s*:\s*$STR\s*,\s*"translation"\s*:\s*"""")
 
-    private val imageItem = Regex("""\{\s*"original"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"translation"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}""")
+    private fun decode(raw: String) = readString(raw + "\"", 0)
 
-    /** Completed {original, translation} items of a streaming screenshot translation. */
-    fun items(buffer: String): List<Pair<String, String>> = imageItem.findAll(buffer).map {
-        readString(it.groupValues[1] + "\"", 0) to readString(it.groupValues[2] + "\"", 0)
-    }.toList()
+    /**
+     * Completed items plus the item still being written (its second string is partial), so the
+     * UI can type it out live. The open item is only returned once its first string is complete.
+     */
+    private fun pairs(buffer: String, from: Int, complete: Regex, open: Regex): List<Pair<String, String>> {
+        val done = complete.findAll(buffer, from).toList()
+        val result = done.map { decode(it.groupValues[1]) to decode(it.groupValues[2]) }.toMutableList()
+        val tail = done.lastOrNull()?.range?.last?.plus(1) ?: from
+        open.find(buffer, tail)?.let { m ->
+            val partial = readString(buffer, m.range.last + 1)
+            if (partial.isNotEmpty()) result += decode(m.groupValues[1]) to partial
+        }
+        return result
+    }
+
+    /** {original, translation} items of a streaming screenshot translation (last one may be partial). */
+    fun items(buffer: String): List<Pair<String, String>> = pairs(buffer, 0, imageItem, imageOpen)
 
     fun extract(buffer: String): PartialResult {
         val text = Regex(""""text"\s*:\s*"""").find(buffer)?.let { readString(buffer, it.range.last + 1) }.orEmpty()
         val start = buffer.indexOf("\"translations\"")
-        val translations = if (start < 0) emptyList() else translationItem.findAll(buffer, start).map {
-            BlockTranslation(readString(it.groupValues[1] + "\"", 0), readString(it.groupValues[2] + "\"", 0))
-        }.toList()
+        val translations = if (start < 0) emptyList()
+            else pairs(buffer, start, translationItem, translationOpen).map { (id, t) -> BlockTranslation(id, t) }
         return PartialResult(text, translations)
     }
 
