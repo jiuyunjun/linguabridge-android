@@ -2,6 +2,7 @@ package dev.linguabridge.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import dev.linguabridge.domain.DisplayMode
 import dev.linguabridge.domain.REPLY_TONES
 
 /** Non-secret floating-assistant preferences shared by the settings screen and the service. */
@@ -52,6 +53,11 @@ class AssistantPrefs(context: Context) {
         get() = preferences.getString(KEY_LAST_TAB, "translate").takeIf { it == "translate" || it == "reply" } ?: "translate"
         set(value) { require(value == "translate" || value == "reply"); preferences.edit().putString(KEY_LAST_TAB, value).apply() }
 
+    /** How a page translation is shown: panel (default), cover the original, or a label next to it. */
+    var displayMode: DisplayMode
+        get() = DisplayMode.of(preferences.getString(KEY_DISPLAY_MODE, DisplayMode.PANEL.id))
+        set(value) { preferences.edit().putString(KEY_DISPLAY_MODE, value.id).apply() }
+
     /** Resolves [openWith] to the tab a bubble tap should show. */
     val initialTab: String get() = if (openWith == "last") lastTab else openWith
 
@@ -68,6 +74,7 @@ class AssistantPrefs(context: Context) {
         const val KEY_BUBBLE_SIDE = "bubbleSide"
         const val KEY_OPEN_WITH = "openWith"
         const val KEY_LAST_TAB = "lastTab"
+        const val KEY_DISPLAY_MODE = "displayMode"
         val OPEN_WITH = linkedMapOf("last" to "上次使用", "translate" to "翻译", "reply" to "回复")
         val TRANSLATE_LANGUAGES = listOf("zh", "ja", "en")
         val REPLY_LANGUAGES = listOf("auto", "ja", "en", "zh")

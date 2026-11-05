@@ -33,7 +33,7 @@ import kotlinx.coroutines.sync.withLock
  * bubble tap, from a fresh active root of the foreground app, with sensitive/editable subtrees
  * excluded, and kept only in memory for the open panel.
  */
-class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
+class InspectorService : AccessibilityService(), FloatingAssistant.Listener, InPlaceOverlay.Listener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val queue = Mutex()
     private val gate = InspectionGate()
@@ -54,11 +54,18 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     /** Screen text of the open panel only. Cleared when the panel closes or the app changes. */
     private var page: ReviewedPage? = null
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> refreshBubble() }
+    private lateinit var inPlace: InPlaceOverlay
+    /** Finished translations of [page], reused when the in-place capsule opens the panel. */
+    private var pageTranslations: List<TranslatedLine>? = null
+    private var pageDemo = false
+    /** Shown by the panel's translate tab instead of requesting a new translation (consumed once). */
+    private var presetTranslate: (() -> Unit)? = null
 
     override fun onServiceConnected() {
         instance = this
         prefs = AssistantPrefs(this)
         assistant = FloatingAssistant(this, prefs, this)
+        inPlace = InPlaceOverlay(this, this)
         serviceInfo = serviceInfo.apply {
             packageNames = null // all apps: the bubble follows the foreground app
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
@@ -81,10 +88,13 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
         val show = prefs.bubbleEnabled && pkg != null && eligible(pkg) && pkg != hiddenUntilSwitch && !locked()
         if (show && !assistant.panelOpen) assistant.showBubble() else if (!show) assistant.hideBubble()
         if (!show && assistant.panelOpen) assistant.closePanel()
+        if (!show && ::inPlace.isInitialized && inPlace.active) closeInPlace()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        event ?: return
+        if (::inPlace.isInitialized && inPlace.drawing) staleCheck(event)
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
         // Keyboards, the system shade/lock screen and our own overlay windows don't change which
         // app is in front; re-check visibility (e.g. keyguard) without switching the target.
@@ -97,15 +107,107 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
             cancelWork()
             page = null
             if (::assistant.isInitialized && assistant.panelOpen) assistant.closePanel()
+            if (::inPlace.isInitialized && inPlace.active) closeInPlace()
         }
         refreshBubble()
     }
+
+    // ---------- in-place translations ----------
+
+    /** Drawn bounds are one observation: a scroll, window or structural change makes them stale. */
+    private fun staleCheck(event: AccessibilityEvent) {
+        val kind = when (event.eventType) {
+            AccessibilityEvent.TYPE_VIEW_SCROLLED -> InPlaceInvalidation.Kind.SCROLLED
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> InPlaceInvalidation.Kind.CONTENT_CHANGED
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> InPlaceInvalidation.Kind.WINDOW_STATE
+            else -> return
+        }
+        val structural = event.contentChangeTypes == AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED ||
+            event.contentChangeTypes and AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE != 0
+        if (InPlaceInvalidation.shouldHide(kind, event.packageName?.toString(), foreground, packageName, structural)) {
+            translateJob?.cancel()
+            watchLayoutChanges(false)
+            inPlace.showStale("页面已变化，译文已收起")
+        }
+    }
+
+    /** Scroll/content events are subscribed only while translations are drawn. */
+    private fun watchLayoutChanges(on: Boolean) {
+        val types = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+            (if (on) AccessibilityEvent.TYPE_VIEW_SCROLLED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED else 0)
+        runCatching { if (serviceInfo.eventTypes != types) serviceInfo = serviceInfo.apply { eventTypes = types } }
+    }
+
+    /** The bubble stays visible: tapping it again turns the translations off. */
+    private fun startInPlace(screen: ReviewedPage, mode: DisplayMode) {
+        inPlace.show(mode)
+        watchLayoutChanges(true)
+        translateJob = scope.launch {
+            val request = pageRequest(screen)
+            val outcome = call(request) { partial ->
+                val items = InPlaceLayout.items(screen.blocks, partial.translations)
+                if (items.isNotEmpty()) onMain {
+                    if (translateJob?.isActive == true && inPlace.drawing) {
+                        inPlace.update(items); inPlace.showWorking("翻译中… ${items.size} 段")
+                    }
+                }
+            }
+            if (!inPlace.drawing) return@launch
+            when (outcome) {
+                is AssistOutcome.Error -> openPanelFromInPlace { assistant.showError(outcome.message, retry = true, screenshot = canScreenshot) }
+                is AssistOutcome.Success -> {
+                    val items = InPlaceLayout.items(screen.blocks, outcome.result.translations)
+                    if (items.isEmpty()) {
+                        openPanelFromInPlace { assistant.showError("这一屏没有需要翻译的文字", retry = false, screenshot = canScreenshot) }
+                        return@launch
+                    }
+                    pageTranslations = lines(screen, outcome.result.translations); pageDemo = outcome.result.demo
+                    inPlace.update(items)
+                    inPlace.showDone(inPlace.placedCount, inPlace.skippedCount, outcome.result.demo)
+                }
+            }
+        }
+    }
+
+    /** Leaves the in-place view for the panel, keeping the page so the panel can copy or reply. */
+    private fun openPanelFromInPlace(translateView: () -> Unit) {
+        val screen = page ?: return closeInPlace()
+        translateJob?.cancel()
+        inPlace.close(); watchLayoutChanges(false)
+        presetTranslate = translateView
+        assistant.hideBubble()
+        assistant.openPanel(FloatingAssistant.Tab.TRANSLATE, screen.blocks.size)
+    }
+
+    private fun closeInPlace() {
+        translateJob?.cancel()
+        inPlace.close()
+        watchLayoutChanges(false)
+        if (!assistant.panelOpen) { page = null; pageTranslations = null; gate.invalidate() }
+        refreshBubble()
+    }
+
+    override fun onInPlaceClose() = closeInPlace()
+
+    override fun onInPlacePanel() {
+        val lines = pageTranslations ?: return
+        val demo = pageDemo
+        openPanelFromInPlace { assistant.showTranslations(lines, demo) }
+    }
+
+    override fun onInPlaceRetranslate() {
+        closeInPlace()
+        onBubbleTap()
+    }
+
+    override fun onInPlaceModeChange(mode: DisplayMode) { prefs.displayMode = mode }
 
     private fun locked() = getSystemService(KeyguardManager::class.java).isKeyguardLocked
 
     // ---------- FloatingAssistant.Listener ----------
 
     override fun onBubbleTap() {
+        if (inPlace.active) { closeInPlace(); return } // the bubble toggles in-place translations off
         val pkg = foreground ?: return
         if (captureJob?.isActive == true || !eligible(pkg) || locked()) return
         assistant.setBubbleBusy(true)
@@ -117,6 +219,10 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
             if (foreground != pkg) return@launch
             val screen = (result as? CaptureResult.Success)?.let { PageContext.screen(it.snapshot) }
             page = screen?.takeIf { it.blocks.isNotEmpty() }
+            pageTranslations = null
+            // In-place modes translate on tap unless the bubble is set to always open the reply tab.
+            val mode = prefs.displayMode
+            page?.let { if (mode.inPlace && prefs.openWith != "reply") { startInPlace(it, mode); return@launch } }
             assistant.hideBubble()
             val failed = page == null
             assistant.openPanel(if (failed || prefs.initialTab == "translate") FloatingAssistant.Tab.TRANSLATE else FloatingAssistant.Tab.REPLY,
@@ -131,26 +237,34 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
     }
 
     override fun onTranslateNeeded() {
+        presetTranslate?.let { presetTranslate = null; it(); return }
         val screen = page ?: return
         if (translateJob?.isActive != true) translate(screen)
     }
 
     override fun onRetry() { page?.let { translate(it) } }
 
+    private fun pageRequest(screen: ReviewedPage) = AssistRequest(operation = AssistOperation.TRANSLATE_PAGE,
+        targetLanguage = prefs.translateLanguage, pageType = "auto", sourcePackage = screen.sourcePackage, targetBlockId = "",
+        userIntent = "", blocks = screen.blocks)
+
+    private fun lines(screen: ReviewedPage, translations: List<BlockTranslation>): List<TranslatedLine> {
+        val byId = screen.blocks.associateBy { it.id }
+        return translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
+    }
+
     private fun translate(screen: ReviewedPage) {
         assistant.showWorking("正在翻译当前屏幕…")
         translateJob = scope.launch {
-            val request = AssistRequest(operation = AssistOperation.TRANSLATE_PAGE, targetLanguage = prefs.translateLanguage,
-                pageType = "auto", sourcePackage = screen.sourcePackage, targetBlockId = "", userIntent = "", blocks = screen.blocks)
-            val byId = screen.blocks.associateBy { it.id }
+            val request = pageRequest(screen)
             val outcome = call(request) { partial ->
-                val lines = partial.translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
+                val lines = lines(screen, partial.translations)
                 if (lines.isNotEmpty()) onMain { if (translateJob?.isActive == true) assistant.showTranslationProgress(lines) }
             }
             when (outcome) {
                 is AssistOutcome.Error -> assistant.showError(outcome.message, retry = true, screenshot = canScreenshot)
                 is AssistOutcome.Success -> {
-                    val lines = outcome.result.translations.mapNotNull { t -> byId[t.id]?.let { TranslatedLine(it.text, t.text) } }
+                    val lines = lines(screen, outcome.result.translations)
                     if (lines.isEmpty()) assistant.showError("这一屏没有需要翻译的文字", retry = false, screenshot = canScreenshot)
                     else assistant.showTranslations(lines, outcome.result.demo)
                 }
@@ -284,6 +398,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
 
     override fun onPanelClosed() {
         translateJob?.cancel(); replyJob?.cancel()
+        presetTranslate = null; pageTranslations = null
         gate.invalidate()
         page = null
         refreshBubble()
@@ -349,6 +464,7 @@ class InspectorService : AccessibilityService(), FloatingAssistant.Listener {
 
     private fun shutdown(message: String) {
         cancelWork(); expiry?.cancel(); gate.stop(); page = null
+        if (::inPlace.isInitialized) { inPlace.close(); watchLayoutChanges(false) }
         if (::assistant.isInitialized) assistant.destroy()
         InspectorState.update { it.copy(connected = false, message = message) }
     }

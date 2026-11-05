@@ -34,6 +34,7 @@ import dev.linguabridge.data.FixtureExporter
 import dev.linguabridge.data.ProxySettingsStore
 import dev.linguabridge.data.api.OpenAIDirectClient
 import dev.linguabridge.data.api.ProxySettings
+import dev.linguabridge.domain.DisplayMode
 import dev.linguabridge.domain.CaptureTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -99,6 +100,7 @@ class InspectorActivity : ComponentActivity() {
         var chooseModel by remember { mutableStateOf(false) }
         var openWith by remember { mutableStateOf(prefs.openWith) }
         var tone by remember { mutableStateOf(prefs.tone) }
+        var displayMode by remember { mutableStateOf(prefs.displayMode) }
 
         LaunchedEffect(resumeEpoch) {
             enabled = serviceEnabled()
@@ -179,6 +181,21 @@ class InspectorActivity : ComponentActivity() {
                     }
                 }
                 Text("只回复时不会请求翻译；切到“翻译”标签才翻译。", color = Muted, fontSize = 12.sp)
+                Text("译文显示方式", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DisplayMode.entries.forEach { mode ->
+                        FilterChip(mode == displayMode, { displayMode = mode; prefs.displayMode = mode }, label = { Text(mode.label) },
+                            modifier = Modifier.testTag("display-${mode.id}"), shape = RoundedCornerShape(9.dp),
+                            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentDim, selectedLabelColor = Accent, labelColor = TextMain))
+                    }
+                }
+                val modeHint = when (displayMode) {
+                    DisplayMode.PANEL -> "译文在底部面板里逐段对照显示。"
+                    DisplayMode.COVER -> "译文直接盖在原文位置，页面一滚动就收起。顶部胶囊可按住看原文、切到面板复制或回复；再点悬浮球关闭。"
+                    DisplayMode.LABEL -> "译文以小标签贴在原文下方，不遮原文；放不下的段落会跳过并计数。页面一滚动就收起。"
+                }
+                Text(modeHint + if (displayMode.inPlace && openWith == "reply") "\n“点悬浮球后打开”设为回复时不会原位翻译。" else "",
+                    color = Muted, fontSize = 12.sp)
                 Text("回复用", fontWeight = FontWeight.Medium)
                 ChipRow(AssistantPrefs.REPLY_LANGUAGES, replyLanguage, "reply") { replyLanguage = it; prefs.replyLanguage = it }
                 Text("回复语气", fontWeight = FontWeight.Medium)
@@ -224,7 +241,7 @@ class InspectorActivity : ComponentActivity() {
                         withContext(Dispatchers.IO) { store.clear(); prefs.clear(); FixtureExporter.clear(this@InspectorActivity) }
                         settings = null; baseUrl = ""; translateLanguage = prefs.translateLanguage; replyLanguage = prefs.replyLanguage
                         bubbleEnabled = prefs.bubbleEnabled; hidden = prefs.hiddenPackages
-                        model = direct?.defaultModel.orEmpty(); openWith = prefs.openWith; tone = prefs.tone
+                        model = direct?.defaultModel.orEmpty(); openWith = prefs.openWith; tone = prefs.tone; displayMode = prefs.displayMode
                         "本机配置和导出已清空"
                     } catch (_: Exception) { "部分数据清理失败，可在系统中清除应用数据" }
                 }
