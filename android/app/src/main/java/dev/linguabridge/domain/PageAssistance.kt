@@ -49,13 +49,15 @@ object PageContext {
      * are skipped), top-to-bottom, without numbers/time-only labels or exact duplicates at the same
      * position. Repeated text at different positions is kept: it can be a real repeated message.
      */
-    fun screen(snapshot: UiSnapshot): ReviewedPage {
+    fun screen(snapshot: UiSnapshot): ReviewedPage = from(snapshot.copy(nodes = screenNodes(snapshot)))
+
+    /** The text nodes [screen] keeps, before any upload budget is applied. */
+    fun screenNodes(snapshot: UiSnapshot): List<InspectedNode> {
         val seen = HashSet<Pair<NodeBounds, String>>()
-        val nodes = snapshot.nodes.filter { node ->
+        return snapshot.nodes.filter { node ->
             val text = node.text?.trim().orEmpty()
             text.isNotEmpty() && !nonLanguage.matches(text) && seen.add(node.bounds to text)
         }.map { it.copy(description = null) }
-        return from(snapshot.copy(nodes = nodes))
     }
 
     /**

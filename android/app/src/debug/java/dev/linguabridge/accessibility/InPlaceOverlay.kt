@@ -1,5 +1,7 @@
 package dev.linguabridge.accessibility
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
@@ -9,6 +11,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.SystemClock
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -36,9 +39,9 @@ import dev.linguabridge.domain.Placement
 class InPlaceOverlay(private val context: Context, private val listener: Listener) {
     interface Listener {
         fun onInPlaceClose()
-        fun onInPlacePanel()
-        fun onInPlaceRetranslate()
+        fun onInPlaceReply()
         fun onInPlaceModeChange(mode: DisplayMode)
+        fun onInPlaceTranslateNew()
     }
 
     private val windows = context.getSystemService(WindowManager::class.java)
@@ -74,40 +77,39 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
         showWorking("正在翻译当前屏幕…")
     }
 
-    fun update(items: List<InPlaceItem>) { layer?.setItems(items, mode) }
+    /**
+     * Draws [items] at their (screen) bounds, replacing the previous ones at once: after a scroll
+     * the translations jump straight to the newly read positions (design.md 15.10 A). [pending]:
+     * original-text bounds still waiting for a translation, drawn as shimmering skeletons (15.10 A2).
+     */
+    fun update(items: List<InPlaceItem>, pending: List<NodeBounds> = emptyList()) { layer?.setItems(items, pending, mode) }
 
     fun showWorking(text: String) = capsuleContent(DOT_WORKING, text, close = true)
 
     private var demo = false
+    private var newCount = 0
 
-    fun showDone(count: Int, skipped: Int, demo: Boolean) {
-        this.demo = demo
+    /** [newCount]: text on screen that has no translation yet (scrolled into view); offered, never auto-uploaded. */
+    fun showDone(count: Int, skipped: Int, demo: Boolean, newCount: Int = this.newCount) {
+        this.demo = demo; this.newCount = newCount
         val text = buildString {
             append(if (mode == DisplayMode.COVER) "原位译文" else "就近标签")
             append(" · $count 段")
             if (skipped > 0) append("（$skipped 段放不下）")
+            if (newCount > 0) append(" · 新内容 $newCount 段")
             if (demo) append(" · 模拟")
         }
-        capsuleContent(if (demo) DOT_WARN else DOT_OK, text, close = true, controls = true)
+        capsuleContent(if (demo) DOT_WARN else DOT_OK, text, close = true, controls = true, translateNew = newCount > 0)
     }
-
-    /** Page changed: drop the drawings, keep a capsule that offers to translate again. */
-    fun showStale(message: String) {
-        removeLayer()
-        if (capsule == null) addCapsule()
-        capsuleContent(DOT_WARN, message, close = true, retranslate = true)
-        capsule?.let { it.removeCallbacks(autoClose); it.postDelayed(autoClose, 5000) }
-    }
-
-    private val autoClose = Runnable { if (layer == null) listener.onInPlaceClose() }
 
     val placedCount get() = layer?.placedCount ?: 0
     val skippedCount get() = layer?.skippedCount ?: 0
 
     fun close() {
         removeLayer()
-        capsule?.let { it.removeCallbacks(autoClose); runCatching { windows.removeView(it) } }
-        capsule = null
+        pulse?.cancel(); pulse = null
+        capsule?.let { runCatching { windows.removeView(it) } }
+        capsule = null; capsuleState = null; capsuleText = null; newCount = 0
     }
 
     private fun removeLayer() {
@@ -135,15 +137,31 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
         capsule = view
     }
 
-    private fun capsuleContent(dot: Int, text: String, close: Boolean, controls: Boolean = false, retranslate: Boolean = false) {
+    /** Last capsule state: re-anchoring while scrolling re-sends it often, and rebuilding would break a held "原文". */
+    private var capsuleState: List<Any>? = null
+    private var capsuleText: TextView? = null
+    /** Breathing status dot while translating. */
+    private var pulse: ObjectAnimator? = null
+
+    private fun capsuleContent(dot: Int, text: String, close: Boolean, controls: Boolean = false, translateNew: Boolean = false) {
         val view = capsule ?: return
+        val state = listOf(dot, close, controls, translateNew, mode)
+        // Only the text changed (e.g. streaming progress): update it in place so the pulse keeps running.
+        if (state == capsuleState) { capsuleText?.let { if (it.text != text) it.text = text }; return }
+        capsuleState = state
+        layer?.visibility = View.VISIBLE
+        pulse?.cancel(); pulse = null
         view.removeAllViews()
-        view.addView(View(context).apply { background = GradientDrawable().apply { setColor(dot); shape = GradientDrawable.OVAL } },
-            LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
-        view.addView(TextView(context).apply {
+        val dotView = View(context).apply { background = GradientDrawable().apply { setColor(dot); shape = GradientDrawable.OVAL } }
+        view.addView(dotView, LinearLayout.LayoutParams(dp(8), dp(8)).apply { marginEnd = dp(6) })
+        if (dot == DOT_WORKING) pulse = ObjectAnimator.ofFloat(dotView, View.ALPHA, 1f, 0.3f).apply {
+            duration = 400; repeatMode = ValueAnimator.REVERSE; repeatCount = ValueAnimator.INFINITE; start()
+        }
+        capsuleText = TextView(context).apply {
             this.text = text; setTextColor(TEXT); setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f); maxLines = 1
             ellipsize = TextUtils.TruncateAt.END; maxWidth = (metrics.widthPixels * 0.45f).toInt()
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(4) })
+        }
+        view.addView(capsuleText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(4) })
         if (controls) {
             view.addView(pill("原文").apply {
                 contentDescription = "按住查看原文"
@@ -158,11 +176,11 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
             val other = if (mode == DisplayMode.COVER) DisplayMode.LABEL else DisplayMode.COVER
             view.addView(pill(if (other == DisplayMode.COVER) "覆盖" else "标签") {
                 mode = other; layer?.setMode(other); listener.onInPlaceModeChange(other)
-                showDone(placedCount, skippedCount, demo)
+                showDone(placedCount, skippedCount, demo, newCount)
             })
-            view.addView(pill("面板") { listener.onInPlacePanel() })
+            view.addView(pill("回复", primary = true) { listener.onInPlaceReply() })
         }
-        if (retranslate) view.addView(pill("重新翻译", primary = true) { listener.onInPlaceRetranslate() })
+        if (translateNew) view.addView(pill("翻译新增") { listener.onInPlaceTranslateNew() })
         if (close) view.addView(pill("✕") { listener.onInPlaceClose() }.apply { contentDescription = "关闭原位译文" })
     }
 
@@ -182,6 +200,7 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
     /** Draws placements from [InPlaceLayout]; bounds are screen coordinates, shifted by this window's own screen offset. */
     private inner class Layer(context: Context) : View(context) {
         private var items: List<InPlaceItem> = emptyList()
+        private var pending: List<NodeBounds> = emptyList()
         private var mode = DisplayMode.COVER
         private var plan: List<Placement> = emptyList()
         var placedCount = 0; private set
@@ -193,7 +212,9 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
         private val rect = RectF()
         private val layouts = HashMap<Pair<String, Float>, StaticLayout>()
 
-        fun setItems(items: List<InPlaceItem>, mode: DisplayMode) { this.items = items; this.mode = mode; changed() }
+        fun setItems(items: List<InPlaceItem>, pending: List<NodeBounds>, mode: DisplayMode) {
+            this.items = items; this.pending = pending; this.mode = mode; changed()
+        }
         fun setMode(mode: DisplayMode) { this.mode = mode; changed() }
 
         /** Re-plans at once when laid out, so the capsule's counts are current. */
@@ -217,8 +238,23 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
             val result = InPlaceLayout(resources.displayMetrics.density) { text, widthPx, sp -> staticLayout(text, widthPx, sp).height }
                 .plan(shifted, mode, width, height)
             plan = result.placements; placedCount = plan.size; skippedCount = result.skipped
+            pendingShifted = pending.map { NodeBounds(it.left - ox, it.top - oy, it.right - ox, it.bottom - oy) }
+            sourceById = items.associate { it.id to it.source.ifEmpty { it.text } }
             layouts.clear(); dirty = false
         }
+
+        private var pendingShifted: List<NodeBounds> = emptyList()
+        private var sourceById: Map<String, String> = emptyMap()
+        /**
+         * First time each segment was drawn, for the fade-in. Keyed by the original text: a streamed
+         * translation grows chunk by chunk, and keying by its text restarted the fade on every chunk
+         * (visible flashing). Survives re-reads, so each segment fades in once.
+         */
+        private val firstSeen = HashMap<String, Long>()
+        private val skeletonPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = SKELETON }
+        private val shimmerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val shimmerMatrix = android.graphics.Matrix()
+        private var shimmerWidth = 0
 
         override fun onDraw(canvas: Canvas) {
             if (width == 0 || height == 0) return
@@ -228,25 +264,64 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
             val padH = ((if (cover) InPlaceLayout.COVER_PAD_H else InPlaceLayout.LABEL_PAD_H) * density).toInt()
             val padV = ((if (cover) InPlaceLayout.COVER_PAD_V else InPlaceLayout.LABEL_PAD_V) * density).toInt()
             val radius = (if (cover) 6 else 8) * density
-            for (p in plan) {
-                rect.set(p.left.toFloat(), p.top.toFloat(), p.right.toFloat(), p.bottom.toFloat())
-                canvas.drawRoundRect(rect, radius, radius, boxPaint)
-                val innerWidth = p.right - p.left - 2 * padH
-                val innerHeight = p.bottom - p.top - 2 * padV
-                val text = layouts.getOrPut(p.id to p.textSizeSp) {
-                    if (!p.clipped) staticLayout(p.text, innerWidth, p.textSizeSp) else {
-                        val lineHeight = staticLayout("国", innerWidth, p.textSizeSp).height.coerceAtLeast(1)
-                        staticLayout(p.text, innerWidth, p.textSizeSp, maxLines = (innerHeight / lineHeight).coerceAtLeast(1))
-                    }
-                }
-                canvas.save()
-                // Cover: vertically centred in the original box; label: top-aligned.
-                val dy = if (cover) ((innerHeight - text.height) / 2).coerceAtLeast(0) else 0
-                canvas.clipRect(rect)
-                canvas.translate((p.left + padH).toFloat(), (p.top + padV + dy).toFloat())
-                text.draw(canvas)
-                canvas.restore()
+            val now = SystemClock.uptimeMillis()
+            var animating = false
+            if (pendingShifted.isNotEmpty()) {
+                updateShimmer(now)
+                for (b in pendingShifted) drawSkeleton(canvas, b, radius)
+                animating = true
             }
+            for (p in plan) {
+                val seen = firstSeen.getOrPut(sourceById[p.id] ?: p.text) { now }
+                val alpha = ((now - seen) / FADE_MS.toFloat()).coerceIn(0f, 1f)
+                if (alpha < 1f) {
+                    animating = true
+                    canvas.saveLayerAlpha(p.left.toFloat(), p.top.toFloat(), p.right.toFloat(), p.bottom.toFloat(), (alpha * 255).toInt())
+                }
+                drawPlacement(canvas, p, cover, padH, padV, radius)
+                if (alpha < 1f) canvas.restore()
+            }
+            if (animating) postInvalidateOnAnimation()
+        }
+
+        /** A highlight band sweeping left to right across the whole screen, one pass per [SHIMMER_MS]. */
+        private fun updateShimmer(now: Long) {
+            if (shimmerWidth != width) {
+                shimmerWidth = width
+                val band = width * 0.4f
+                shimmerPaint.shader = android.graphics.LinearGradient(0f, 0f, band, 0f,
+                    intArrayOf(0x00FFFFFF, SHIMMER_HIGHLIGHT, 0x00FFFFFF), null, android.graphics.Shader.TileMode.CLAMP)
+            }
+            val band = width * 0.4f
+            val progress = (now % SHIMMER_MS) / SHIMMER_MS.toFloat()
+            shimmerMatrix.setTranslate(-band + progress * (width + band), 0f)
+            shimmerPaint.shader?.setLocalMatrix(shimmerMatrix)
+        }
+
+        private fun drawSkeleton(canvas: Canvas, b: NodeBounds, radius: Float) {
+            rect.set(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat())
+            canvas.drawRoundRect(rect, radius, radius, skeletonPaint)
+            canvas.drawRoundRect(rect, radius, radius, shimmerPaint)
+        }
+
+        private fun drawPlacement(canvas: Canvas, p: Placement, cover: Boolean, padH: Int, padV: Int, radius: Float) {
+            rect.set(p.left.toFloat(), p.top.toFloat(), p.right.toFloat(), p.bottom.toFloat())
+            canvas.drawRoundRect(rect, radius, radius, boxPaint)
+            val innerWidth = p.right - p.left - 2 * padH
+            val innerHeight = p.bottom - p.top - 2 * padV
+            val text = layouts.getOrPut(p.id to p.textSizeSp) {
+                if (!p.clipped) staticLayout(p.text, innerWidth, p.textSizeSp) else {
+                    val lineHeight = staticLayout("国", innerWidth, p.textSizeSp).height.coerceAtLeast(1)
+                    staticLayout(p.text, innerWidth, p.textSizeSp, maxLines = (innerHeight / lineHeight).coerceAtLeast(1))
+                }
+            }
+            canvas.save()
+            // Cover: vertically centred in the original box; label: top-aligned.
+            val dy = if (cover) ((innerHeight - text.height) / 2).coerceAtLeast(0) else 0
+            canvas.clipRect(rect)
+            canvas.translate((p.left + padH).toFloat(), (p.top + padV + dy).toFloat())
+            text.draw(canvas)
+            canvas.restore()
         }
     }
 
@@ -262,5 +337,10 @@ class InPlaceOverlay(private val context: Context, private val listener: Listene
         const val DOT_OK = 0xFF67E3A1.toInt()
         const val DOT_WORKING = 0xFF5ED0FF.toInt()
         const val DOT_WARN = 0xFFFFC66B.toInt()
+        /** Skeleton over original text while its translation is on the way: accent tint, original stays readable. */
+        const val SKELETON = 0x335ED0FF
+        const val SHIMMER_HIGHLIGHT = 0x66FFFFFF
+        const val SHIMMER_MS = 1200L
+        const val FADE_MS = 180L
     }
 }

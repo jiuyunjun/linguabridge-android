@@ -82,14 +82,62 @@ class InPlaceLayoutTest {
         assertEquals(DisplayMode.LABEL, DisplayMode.of("label"))
     }
 
-    @Test fun onlyForegroundStructuralChangesHideTranslations() {
+    @Test fun onlyForegroundStructuralChangesReanchorTranslations() {
         val fg = "jp.naver.line.android"; val own = "dev.linguabridge.debug"
-        assertTrue(InPlaceInvalidation.shouldHide(Kind.SCROLLED, fg, fg, own, structural = false))
-        assertTrue(InPlaceInvalidation.shouldHide(Kind.WINDOW_STATE, fg, fg, own, structural = false))
-        assertTrue(InPlaceInvalidation.shouldHide(Kind.CONTENT_CHANGED, fg, fg, own, structural = true))
-        assertFalse(InPlaceInvalidation.shouldHide(Kind.CONTENT_CHANGED, fg, fg, own, structural = false))
-        assertFalse(InPlaceInvalidation.shouldHide(Kind.SCROLLED, own, own, own, structural = true))
-        assertFalse(InPlaceInvalidation.shouldHide(Kind.SCROLLED, "com.android.systemui", fg, own, structural = true))
-        assertFalse(InPlaceInvalidation.shouldHide(Kind.SCROLLED, null, fg, own, structural = true))
+        assertTrue(InPlaceInvalidation.needsReanchor(Kind.SCROLLED, fg, fg, own, structural = false))
+        assertTrue(InPlaceInvalidation.needsReanchor(Kind.WINDOW_STATE, fg, fg, own, structural = false))
+        assertTrue(InPlaceInvalidation.needsReanchor(Kind.CONTENT_CHANGED, fg, fg, own, structural = true))
+        assertFalse(InPlaceInvalidation.needsReanchor(Kind.CONTENT_CHANGED, fg, fg, own, structural = false))
+        assertFalse(InPlaceInvalidation.needsReanchor(Kind.SCROLLED, own, own, own, structural = true))
+        assertFalse(InPlaceInvalidation.needsReanchor(Kind.SCROLLED, "com.android.systemui", fg, own, structural = true))
+        assertFalse(InPlaceInvalidation.needsReanchor(Kind.SCROLLED, null, fg, own, structural = true))
+    }
+
+    private fun block(id: String, top: Int, text: String) = ContextBlock(id, id, NodeBounds(0, top, 300, top + 40), text)
+    private fun node(path: String, top: Int, text: String?) =
+        InspectedNode(path, "0", "android.widget.TextView", null, NodeBounds(0, top, 300, top + 40), text, null)
+
+    @Test fun translationsFollowTheirOriginalTextAfterScrolling() {
+        val first = listOf(block("b1", 100, "Hello"), block("b2", 200, "How are you?"))
+        val known = InPlaceAnchor.translationsByText(first, listOf(BlockTranslation("b1", "你好"), BlockTranslation("b2", "你好吗？")))
+        // Scrolled up by 150px: "Hello" left the screen, "How are you?" moved, new text appeared below.
+        val scrolled = InPlaceAnchor.blocks(UiSnapshot(0, 1, listOf(
+            node("0/1", 50, "How are you?"), node("0/2", 400, "See you tomorrow"), node("0/3", 450, "12:30")), false))
+        val result = InPlaceAnchor.anchor(scrolled, known)
+        assertEquals(listOf(NodeBounds(0, 50, 300, 90) to "你好吗？"), result.items.map { it.bounds to it.text })
+        assertEquals(listOf("See you tomorrow"), result.untranslated.map { it.text })
+    }
+
+    @Test fun sourceKeyStaysTheSameWhileAStreamedTranslationGrows() {
+        val current = listOf(block("a1", 0, "  How are you? "))
+        val early = InPlaceAnchor.anchor(current, mapOf("How are you?" to "你好")).items.single()
+        val later = InPlaceAnchor.anchor(current, mapOf("How are you?" to "你好吗？最近怎么样")).items.single()
+        assertNotEquals(early.text, later.text)
+        assertEquals("How are you?", early.source)
+        assertEquals(early.source, later.source)
+    }
+
+    @Test fun repeatedOriginalTextIsDrawnAtEveryPositionButCountedOnceAsNew() {
+        val known = mapOf("OK" to "好的")
+        val current = listOf(block("a1", 0, "OK"), block("a2", 50, "OK"), block("a3", 100, "Thanks"), block("a4", 150, "Thanks"))
+        val result = InPlaceAnchor.anchor(current, known)
+        assertEquals(listOf("a1", "a2"), result.items.map { it.id })
+        assertEquals(listOf("a3"), result.untranslated.map { it.id })
+    }
+
+    @Test fun anchorMatchesTrimmedTextAndIgnoresBlankTranslations() {
+        val known = InPlaceAnchor.translationsByText(listOf(block("b1", 0, "  Hi "), block("b2", 50, "Bye")),
+            listOf(BlockTranslation("b1", "嗨"), BlockTranslation("b2", " "), BlockTranslation("b9", "x")))
+        assertEquals(mapOf("Hi" to "嗨"), known)
+        assertEquals(listOf("嗨"), InPlaceAnchor.anchor(listOf(block("a1", 300, "Hi")), known).items.map { it.text })
+    }
+
+    @Test fun newContentRequestStaysWithinUploadLimitsAndIsRenumbered() {
+        val big = "x".repeat(1500)
+        val blocks = InPlaceAnchor.requestBlocks(List(10) { block("a$it", it * 50, big + it) })
+        assertTrue(blocks.sumOf { it.text.toByteArray().size } <= PageContext.MAX_BYTES)
+        assertEquals(3, blocks.size)
+        assertEquals(listOf("b1", "b2", "b3"), blocks.map { it.id })
+        assertTrue(InPlaceAnchor.requestBlocks(List(100) { block("a$it", it, "t$it") }).size <= PageContext.MAX_BLOCKS)
     }
 }
